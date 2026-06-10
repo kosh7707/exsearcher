@@ -48,12 +48,25 @@ std::vector<Token> tokenize(const std::string& s) {
     while (i < s.size()) {
         while (i < s.size() && s[i] == ' ')
             ++i;
-        size_t start = i;
-        while (i < s.size() && s[i] != ' ')
-            ++i;
-        if (i <= start)
+        if (i >= s.size())
+            break;
+        // Collect one token. Double quotes group spaces into a single token
+        // (folder names like "ZZ. Sehwa" contain spaces); the quote characters
+        // themselves are dropped. An unterminated quote runs to end of query.
+        std::string raw;
+        bool inQuote = false;
+        for (; i < s.size(); ++i) {
+            const char c = s[i];
+            if (c == '"') {
+                inQuote = !inQuote;
+                continue;
+            }
+            if (c == ' ' && !inQuote)
+                break;
+            raw.push_back(c);
+        }
+        if (raw.empty())
             continue;
-        std::string raw = s.substr(start, i - start);
 
         Token tok;
         if (raw.back() == '\\' || raw.back() == '/') {
