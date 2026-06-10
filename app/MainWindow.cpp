@@ -175,6 +175,20 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     MARGINS margins{0, 0, 1, 0};
     DwmExtendFrameIntoClientArea(hwnd, &margins);
 
+    // FramelessWindowHint strips WS_THICKFRAME/WS_CAPTION, but native edge
+    // resizing (the HTLEFT.. results from WM_NCHITTEST) only works when
+    // WS_THICKFRAME is present, and smooth minimize/maximize animations need
+    // WS_CAPTION. Restore them — their visual frame never shows because our
+    // WM_NCCALCSIZE handler claims the whole rect as client area.
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    SetWindowLongPtrW(hwnd, GWL_STYLE,
+                      style | WS_THICKFRAME | WS_CAPTION | WS_MINIMIZEBOX |
+                          WS_MAXIMIZEBOX);
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+
+    setMinimumSize(640, 420);
+
     // --- Settings (portable ini next to exe) ---
     const QString iniPath =
         QCoreApplication::applicationDirPath() + QStringLiteral("/settings.ini");
