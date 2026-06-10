@@ -1,0 +1,15 @@
+# Build output
+build/
+out/
+
+# Runtime-generated state (portable app keeps these next to the exe)
+data/
+settings.ini
+
+# OMC session state
+.omc/
+
+# IDE
+.vs/
+.vscode/
+CMakeUserPresets.json
