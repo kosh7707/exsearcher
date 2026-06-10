@@ -1,0 +1,72 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: CLI smoke test
+        run: |
+          $out = "cmakelists" | .\build\Release\exsearcher-cli.exe "$env:GITHUB_WORKSPACE" | Out-String
+          Write-Host $out
+          if ($out -notmatch "matches") { Write-Error "search produced no output"; exit 1 }
+          if ($out -match "\b0 matches") { Write-Error "expected CMakeLists.txt to match"; exit 1 }
+
+      - name: Snapshot round-trip test
+        run: |
+          $snap = Join-Path $env:RUNNER_TEMP "ci.exsdb"
+          "" | .\build\Release\exsearcher-cli.exe --save $snap "$env:GITHUB_WORKSPACE\core" | Out-String | Write-Host
+          $out = "index" | .\build\Release\exsearcher-cli.exe --load $snap | Out-String
+          Write-Host $out
+          if ($out -match "\b0 matches" -or $out -match "Load failed") { Write-Error "snapshot round-trip failed"; exit 1 }
+
+      - name: Stage portable folder (deploy)
+        run: cmake --build build --config Release --target deploy
+
+      - name: Zip portable package
+        run: Compress-Archive -Path build/dist/exsearcher -DestinationPath exsearcher-win64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exsearcher-win64
+          path: exsearcher-win64.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: exsearcher-win64
+
+      - name: Stamp version into file name
+        run: mv exsearcher-win64.zip "exsearcher-${GITHUB_REF_NAME}-win64.zip"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: exsearcher-*-win64.zip
+          generate_release_notes: true
