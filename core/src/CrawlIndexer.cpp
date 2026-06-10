@@ -155,7 +155,10 @@ void CrawlIndexer::workerLoop() {
             st.queue.pop_front();
         }
 
-        processDirectory(item);
+        // Skip the actual enumeration when cancelled, but still account for the
+        // pending decrement below so termination logic stays correct.
+        if (!cancel_.load(std::memory_order_relaxed))
+            processDirectory(item);
 
         // Decrement pending AFTER finishing this directory. When the last
         // outstanding directory completes, signal all workers to exit.

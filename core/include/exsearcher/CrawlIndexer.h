@@ -2,6 +2,7 @@
 
 #include "exsearcher/Index.h"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -30,6 +31,14 @@ public:
     // Crawl all roots (e.g. "C:\\", "D:\\some\\dir"). Blocks until done.
     CrawlStats crawl(const std::vector<std::wstring>& roots);
 
+    // Cooperative cancellation: workers stop descending once set. Checked per
+    // directory, so crawl() returns promptly (with partial results). Safe to
+    // call from another thread while crawl() runs (e.g. on window close).
+    void requestCancel() { cancel_.store(true, std::memory_order_relaxed); }
+    bool cancelRequested() const {
+        return cancel_.load(std::memory_order_relaxed);
+    }
+
 private:
     struct WorkItem {
         std::wstring path;     // directory path WITHOUT long-path prefix
@@ -42,6 +51,7 @@ private:
     Index& index_;
     unsigned threadCount_ = 0;
     ProgressCallback progress_;
+    std::atomic<bool> cancel_{false};
 
     // Shared work queue + synchronization live in the .cpp via an opaque state
     // pointer to keep windows.h out of this header.
