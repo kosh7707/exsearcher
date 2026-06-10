@@ -76,8 +76,16 @@ CrawlStats CrawlIndexer::crawl(const std::vector<std::wstring>& roots) {
 
     unsigned threads = threadCount_;
     if (threads == 0) {
+        // Directory enumeration is synchronous-I/O bound: FindFirstFileEx
+        // workers mostly block, so oversubscribe relative to core count.
+        // threads = clamp(hardware_concurrency * 2, 8, 32).
         unsigned hc = std::thread::hardware_concurrency();
-        threads = hc ? (hc < 8u ? hc : 8u) : 4u;
+        unsigned want = hc ? hc * 2u : 8u;
+        if (want < 8u)
+            want = 8u;
+        else if (want > 32u)
+            want = 32u;
+        threads = want;
     }
 
     // Seed the queue with root directory entries.
@@ -104,11 +112,11 @@ CrawlStats CrawlIndexer::crawl(const std::vector<std::wstring>& roots) {
             dirAttr = attrs;
 
         PendingEntry rootEntry;
-        rootEntry.name = wintext::toUtf8(storeName);
-        std::wstring folded = wintext::caseFold(storeName);
-        std::string foldedU8 = wintext::toUtf8(folded);
-        rootEntry.nameLower =
-            (foldedU8.size() == rootEntry.name.size()) ? foldedU8 : rootEntry.name;
+        std::wstring rootFoldScratch;
+        wintext::toUtf8AndLower(storeName.c_str(),
+                                static_cast<int>(storeName.size()),
+                                rootEntry.name, rootEntry.nameLower,
+                                rootFoldScratch);
         rootEntry.parentIdx = Index::kNoParent;
         rootEntry.size = 0;
         rootEntry.mtime = mtime;
@@ -197,19 +205,22 @@ void CrawlIndexer::processDirectory(const WorkItem& item) {
     std::vector<std::wstring> subdirNames;  // names of subdirs to descend into
     std::vector<size_t> subdirBatchPos;     // batch positions of those subdirs
 
+    // Scratch buffers reused across every entry in this directory so the
+    // per-file name conversion does not reallocate. PendingEntry owns its own
+    // strings (moved into the batch); these only stage the conversion.
+    std::wstring foldScratch;
+
     do {
         const wchar_t* n = fd.cFileName;
         if (n[0] == L'.' && (n[1] == L'\0' || (n[1] == L'.' && n[2] == L'\0')))
             continue;  // skip "." and ".."
 
-        std::wstring wname(n);
+        int nlen = 0;
+        while (n[nlen] != L'\0')
+            ++nlen;
 
         PendingEntry pe;
-        pe.name = wintext::toUtf8(wname);
-        std::wstring folded = wintext::caseFold(wname);
-        std::string foldedU8 = wintext::toUtf8(folded);
-        pe.nameLower =
-            (foldedU8.size() == pe.name.size()) ? foldedU8 : pe.name;
+        wintext::toUtf8AndLower(n, nlen, pe.name, pe.nameLower, foldScratch);
         pe.parentIdx = item.parentIdx;
         pe.size = (static_cast<uint64_t>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
         pe.mtime = (static_cast<uint64_t>(fd.ftLastWriteTime.dwHighDateTime) << 32) |
@@ -228,7 +239,7 @@ void CrawlIndexer::processDirectory(const WorkItem& item) {
             // Index the reparse point itself but do NOT descend into it
             // (avoids junction/symlink loops, e.g. C:\Users\... junctions).
             if (!isReparse) {
-                subdirNames.push_back(std::move(wname));
+                subdirNames.emplace_back(n, static_cast<size_t>(nlen));
                 subdirBatchPos.push_back(batchPos);
             }
         } else {

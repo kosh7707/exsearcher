@@ -12,8 +12,10 @@
 #include <QApplication>
 #include <QFile>
 #include <QIcon>
+#include <QLineEdit>
 #include <QPalette>
 #include <QString>
+#include <QTimer>
 #include <QVector>
 
 namespace {
@@ -81,11 +83,14 @@ int main(int argc, char** argv) {
     // Apply light palette globally.
     app.setPalette(buildLightPalette());
 
-    // Load QSS from the embedded resource.
+    // Load QSS from the embedded resource. A missing resource means the qrc
+    // wasn't compiled in (AUTORCC) — fail loudly, an unstyled app is broken.
     {
         QFile f(QStringLiteral(":/style.qss"));
         if (f.open(QIODevice::ReadOnly | QIODevice::Text))
             app.setStyleSheet(QString::fromUtf8(f.readAll()));
+        else
+            qFatal("style.qss resource missing (qrc not compiled in?)");
     }
 
     // Window/taskbar icon from embedded resource.
@@ -102,7 +107,33 @@ int main(int argc, char** argv) {
         LocalFree(wargv);
     }
 
+    // Dev aid: --screenshot <path> renders the window, saves a grab of it
+    // (including the custom in-client titlebar), and exits. Lets design
+    // iterations be verified without a human launching the app.
+    QString shotPath;
+    for (int i = 0; i + 1 < roots.size(); ++i) {
+        if (roots[i] == QLatin1String("--screenshot")) {
+            shotPath = roots[i + 1];
+            roots.remove(i, 2);
+            break;
+        }
+    }
+
     MainWindow win(roots);
     win.show();
+
+    if (!shotPath.isEmpty()) {
+        // Optional EXSEARCHER_SHOT_QUERY env var pre-fills the search box so
+        // the capture shows populated results.
+        const QByteArray q = qgetenv("EXSEARCHER_SHOT_QUERY");
+        if (!q.isEmpty()) {
+            if (auto* box = win.findChild<QLineEdit*>())
+                box->setText(QString::fromUtf8(q));
+        }
+        QTimer::singleShot(700, &win, [&win, shotPath] {
+            win.grab().save(shotPath);
+            QApplication::quit();
+        });
+    }
     return app.exec();
 }

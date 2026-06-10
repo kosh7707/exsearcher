@@ -65,14 +65,21 @@ void DriveChipBar::restyleChip(QPushButton* btn) {
     const bool isIndexed = indexed_.contains(letter);
     const bool isChecked = checked_.value(letter, true);
 
-    // Dynamic properties drive the stylesheet selectors.
+    // Dynamic properties drive the stylesheet selectors. NOTE: must not be
+    // named "checked" — that collides with QAbstractButton's own property,
+    // whose setter rejects writes on non-checkable buttons.
     btn->setProperty("indexed", isIndexed);
-    btn->setProperty("checked", isIndexed && isChecked);
+    btn->setProperty("included", isIndexed && isChecked);
 
     QString tip = letter;
-    // Find drive remoteness for the tooltip text.
+    // Find drive remoteness for the tooltip text and the chip label.
     for (const DriveInfo& di : drives_) {
         if (di.letter == letter) {
+            const QString base = di.letter + (di.isRemote
+                ? QStringLiteral(" 네트워크")
+                : QStringLiteral(" 로컬"));
+            // "+" prefix signals click-to-index on unindexed drives.
+            btn->setText(isIndexed ? base : QStringLiteral("+ ") + base);
             tip += di.isRemote ? QStringLiteral(" 네트워크 드라이브")
                                : QStringLiteral(" 로컬 드라이브");
             break;

@@ -182,8 +182,8 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     auto* searchPanel = new QWidget(central);
     searchPanel->setObjectName("searchPanel");
     auto* panelLayout = new QVBoxLayout(searchPanel);
-    panelLayout->setContentsMargins(12, 10, 12, 8);
-    panelLayout->setSpacing(8);
+    panelLayout->setContentsMargins(16, 12, 16, 10);
+    panelLayout->setSpacing(10);
 
     // Search box.
     auto* searchRow = new QWidget(searchPanel);

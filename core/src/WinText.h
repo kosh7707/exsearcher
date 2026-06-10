@@ -22,4 +22,21 @@ inline std::wstring toUtf16(const std::string& s) {
 // Case-fold UTF-16 using LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE).
 std::wstring caseFold(const std::wstring& s);
 
+// Hot-path helper for the crawler: from a UTF-16 name produce BOTH the UTF-8
+// original (`outName`) and its case-folded lowercase UTF-8 mirror (`outLower`).
+//
+// The mirror is guaranteed to have the SAME byte length as outName (the Index
+// search path relies on shared offsets). When a non-ASCII fold would change the
+// byte length, outLower falls back to a copy of outName (matching the prior
+// `foldedU8.size() == name.size() ? foldedU8 : name` semantics).
+//
+// Fast path: if every UTF-16 unit is < 0x80 (pure ASCII, the vast majority of
+// filenames) both strings are produced in a single inline loop with ZERO Win32
+// calls. Otherwise it falls back to LCMapStringEx + WideCharToMultiByte.
+//
+// `foldScratch` is a caller-owned std::wstring reused across calls to avoid a
+// per-name allocation on the non-ASCII path; it is cleared internally.
+void toUtf8AndLower(const wchar_t* name, int len, std::string& outName,
+                    std::string& outLower, std::wstring& foldScratch);
+
 } // namespace exsearcher::wintext

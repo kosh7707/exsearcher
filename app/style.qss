@@ -1,5 +1,5 @@
-/* ============================================================
-   exsearcher — light Fluent theme
+﻿/* ============================================================
+   exsearcher - light Fluent theme
    Base: Fusion style + light QPalette (set in main.cpp)
    Accent: Fluent blue #0F6CBD / hover #0C5AA0
    Background: warm off-white #FAFAF8 / panels #F4F4F2
@@ -81,9 +81,9 @@ QMainWindow {
 #searchBox {
     background-color: #FFFFFF;
     color: #1A1A1A;
-    border: 1px solid #E3E3E0;
-    border-radius: 4px;
-    padding: 6px 10px;
+    border: 1px solid #D9D9D6;
+    border-radius: 6px;
+    padding: 6px 12px;
     font-size: 15px;
     selection-background-color: #0F6CBD;
     selection-color: #FFFFFF;
@@ -92,7 +92,6 @@ QMainWindow {
 
 #searchBox:focus {
     border-color: #0F6CBD;
-    border-width: 1.5px;
 }
 
 #searchBox:hover:!focus {
@@ -117,45 +116,49 @@ QMainWindow {
     background: transparent;
 }
 
+/* Pills, uniform 26px. State is carried by fill density:
+   checked = soft accent tint, indexed-unchecked = plain outline,
+   not-indexed = ghost (no fill, muted, "+" label affordance). */
 QPushButton[chipButton="true"] {
     background-color: #FFFFFF;
-    color: #1A1A1A;
-    border: 1px solid #E3E3E0;
-    border-radius: 4px;
-    padding: 3px 12px;
+    color: #44444A;
+    border: 1px solid #D9D9D6;
+    border-radius: 13px;
+    padding: 0px 14px;
     font-size: 12px;
     font-weight: 500;
-    min-height: 24px;
-    max-height: 24px;
+    min-height: 26px;
+    max-height: 26px;
 }
 
 QPushButton[chipButton="true"]:hover {
     border-color: #0F6CBD;
     color: #0F6CBD;
-    background-color: #F0F6FC;
 }
 
-/* indexed + included in search (the "checked" dynamic property) */
-QPushButton[chipButton="true"][checked="true"] {
-    background-color: #0F6CBD;
+/* indexed + included in search (the "included" dynamic property) */
+QPushButton[chipButton="true"][included="true"] {
+    background-color: #E3EEF9;
+    border-color: #9CC3E5;
+    color: #0B5394;
+    font-weight: 600;
+}
+
+QPushButton[chipButton="true"][included="true"]:hover {
+    background-color: #D3E5F5;
     border-color: #0F6CBD;
-    color: #FFFFFF;
 }
 
-QPushButton[chipButton="true"][checked="true"]:hover {
-    background-color: #0C5AA0;
-    border-color: #0C5AA0;
+QPushButton[chipButton="true"][included="true"]:pressed {
+    background-color: #C2DBF0;
 }
 
-QPushButton[chipButton="true"][checked="true"]:pressed {
-    background-color: #094D8A;
-}
-
-/* not indexed yet: dashed outline, muted, hints "click to index" */
+/* not indexed yet: ghost chip, "+" in the label hints click-to-index */
 QPushButton[chipButton="true"][indexed="false"] {
     background-color: transparent;
-    border: 1.5px dashed #BABAB8;
+    border-color: #E3E3E0;
     color: #9B9B98;
+    font-weight: 400;
 }
 
 QPushButton[chipButton="true"][indexed="false"]:hover {
@@ -166,24 +169,23 @@ QPushButton[chipButton="true"][indexed="false"]:hover {
 
 QPushButton[chipButton="true"]:disabled {
     background-color: #F4F4F2;
-    border-color: #E3E3E0;
+    border-color: #E9E9E6;
     color: #C0C0BC;
 }
 
-/* ---- reindex button ---- */
+/* ---- reindex button: quiet text button ---- */
 QPushButton[reindexButton="true"] {
     background-color: transparent;
     color: #6B6B68;
-    border: 1px solid #E3E3E0;
-    border-radius: 4px;
-    padding: 3px 10px;
+    border: none;
+    border-radius: 13px;
+    padding: 0px 12px;
     font-size: 12px;
-    min-height: 24px;
-    max-height: 24px;
+    min-height: 26px;
+    max-height: 26px;
 }
 
 QPushButton[reindexButton="true"]:hover {
-    border-color: #0F6CBD;
     color: #0F6CBD;
     background-color: #F0F6FC;
 }
@@ -194,7 +196,7 @@ QPushButton[reindexButton="true"]:pressed {
 
 QPushButton[reindexButton="true"]:disabled {
     color: #C0C0BC;
-    border-color: #E3E3E0;
+    background-color: transparent;
 }
 
 /* ---- crawl progress bar ---- */
@@ -249,24 +251,16 @@ QHeaderView {
 }
 
 QHeaderView::section {
-    background-color: #F4F4F2;
-    color: #6B6B68;
+    background-color: #FFFFFF;
+    color: #9B9B98;
     border: none;
     border-bottom: 1px solid #E3E3E0;
-    border-right: 1px solid #E3E3E0;
-    padding: 4px 8px;
+    padding: 6px 8px;
     font-size: 11px;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
-}
-
-QHeaderView::section:last {
-    border-right: none;
 }
 
 QHeaderView::section:hover {
-    background-color: #EBEBEA;
     color: #1A1A1A;
 }
 

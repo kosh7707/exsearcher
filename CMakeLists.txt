@@ -45,7 +45,10 @@ qt_add_executable(exsearcher WIN32
     app/DriveChipBar.cpp
     app/DriveChipBar.h
 )
-set_target_properties(exsearcher PROPERTIES AUTOMOC ON)
+# AUTORCC is required for app/resources.qrc — without it the qrc is silently
+# treated as an inert file and :/style.qss + :/icon256.png don't exist at
+# runtime (the app then renders completely unstyled).
+set_target_properties(exsearcher PROPERTIES AUTOMOC ON AUTORCC ON)
 # dwmapi: DwmExtendFrameIntoClientArea for custom frameless titlebar shadow
 target_link_libraries(exsearcher PRIVATE exsearcher-core Qt6::Widgets Qt6::Concurrent dwmapi)
 
