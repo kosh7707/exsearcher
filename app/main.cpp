@@ -79,6 +79,8 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("exsearcher"));
     app.setOrganizationName(QStringLiteral("kosh"));
+    // Closing the window hides to the tray; only the tray menu quits.
+    app.setQuitOnLastWindowClosed(false);
 
     // Apply light palette globally.
     app.setPalette(buildLightPalette());

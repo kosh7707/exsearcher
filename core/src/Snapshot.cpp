@@ -117,10 +117,70 @@ bool readWholeFile(const std::wstring& filePath, std::vector<char>& bytes) {
 
 bool saveSnapshot(const Index& index, const std::vector<RootMeta>& roots,
                   const std::wstring& filePath) {
-    const std::vector<FileEntry>& entries = index.entries();
+    const std::vector<FileEntry>& srcEntries = index.entries();
+    const char* srcNames = index.nameData();
+    const char* srcLower = index.lowerData();
+
+    // Compact tombstoned entries out so the persisted file (format v1) never
+    // carries logically-deleted rows. An entry is dropped if it is tombstoned
+    // OR its parent was dropped (parents precede children, so a single forward
+    // pass is enough). Root entry indices in RootMeta are remapped through the
+    // same old->new map. When nothing is tombstoned this serializes the buffers
+    // as-is via the identity remap, keeping the common path cheap.
+    const size_t oldCount = srcEntries.size();
+    std::vector<FileEntry> entries;          // compacted copy to serialize
+    std::string names;                       // compacted name buffer
+    std::string lower;                       // compacted lowercase mirror
+    std::vector<uint32_t> remap;             // old idx -> new idx (or kNoParent)
+
+    if (index.tombstoneCount() == 0) {
+        // Fast path: identity. Serialize the live buffers directly.
+        entries.assign(srcEntries.begin(), srcEntries.end());
+        names.assign(srcNames, static_cast<size_t>(index.nameSize()));
+        lower.assign(srcLower, static_cast<size_t>(index.lowerSize()));
+        remap.resize(oldCount);
+        for (size_t i = 0; i < oldCount; ++i)
+            remap[i] = static_cast<uint32_t>(i);
+    } else {
+        std::vector<uint8_t> removed(oldCount, 0);
+        for (size_t i = 0; i < oldCount; ++i) {
+            const FileEntry& fe = srcEntries[i];
+            const bool parentDropped = (fe.parentIdx != Index::kNoParent) &&
+                                       removed[fe.parentIdx] != 0;
+            if ((fe.attr & kAttrTombstone) != 0 || parentDropped)
+                removed[i] = 1;
+        }
+
+        remap.assign(oldCount, Index::kNoParent);
+        entries.reserve(oldCount);
+        names.reserve(index.nameSize());
+        lower.reserve(index.lowerSize());
+
+        for (size_t i = 0; i < oldCount; ++i) {
+            if (removed[i])
+                continue;
+            const FileEntry& fe = srcEntries[i];
+            FileEntry ne = fe;
+            ne.nameOffset = static_cast<uint32_t>(names.size());
+            names.append(srcNames + fe.nameOffset, fe.nameLen);
+            lower.append(srcLower + fe.nameOffset, fe.nameLen);
+            remap[i] = static_cast<uint32_t>(entries.size());
+            entries.push_back(ne);
+        }
+        for (size_t i = 0; i < oldCount; ++i) {
+            if (removed[i])
+                continue;
+            const uint32_t newIdx = remap[i];
+            const uint32_t oldParent = srcEntries[i].parentIdx;
+            entries[newIdx].parentIdx = (oldParent == Index::kNoParent)
+                                            ? Index::kNoParent
+                                            : remap[oldParent];
+        }
+    }
+
     const uint64_t entryCount = entries.size();
-    const uint64_t nameBufSize = index.nameSize();
-    const uint64_t lowerBufSize = index.lowerSize();
+    const uint64_t nameBufSize = names.size();
+    const uint64_t lowerBufSize = lower.size();
 
     std::vector<char> out;
     out.reserve(static_cast<size_t>(
@@ -137,14 +197,24 @@ bool saveSnapshot(const Index& index, const std::vector<RootMeta>& roots,
         putBytes(out, reinterpret_cast<const char*>(entries.data()),
                  static_cast<size_t>(entryCount) * sizeof(FileEntry));
     if (nameBufSize)
-        putBytes(out, index.nameData(), static_cast<size_t>(nameBufSize));
+        putBytes(out, names.data(), static_cast<size_t>(nameBufSize));
     if (lowerBufSize)
-        putBytes(out, index.lowerData(), static_cast<size_t>(lowerBufSize));
+        putBytes(out, lower.data(), static_cast<size_t>(lowerBufSize));
 
-    const uint32_t rootCount = static_cast<uint32_t>(roots.size());
-    put(out, rootCount);
+    // Roots whose entry survived compaction (a root is dropped only if it was
+    // itself tombstoned, which the controller never does). Remap indices.
+    std::vector<const RootMeta*> keptRoots;
+    keptRoots.reserve(roots.size());
     for (const RootMeta& rm : roots) {
-        put(out, rm.rootEntryIdx);
+        if (rm.rootEntryIdx < oldCount && remap[rm.rootEntryIdx] != Index::kNoParent)
+            keptRoots.push_back(&rm);
+    }
+
+    const uint32_t rootCount = static_cast<uint32_t>(keptRoots.size());
+    put(out, rootCount);
+    for (const RootMeta* rmp : keptRoots) {
+        const RootMeta& rm = *rmp;
+        put(out, remap[rm.rootEntryIdx]);
         put(out, rm.crawledAtFiletime);
         const uint16_t pathLen =
             static_cast<uint16_t>(rm.rootPathU8.size() > 0xFFFFu

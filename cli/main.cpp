@@ -12,7 +12,9 @@
 #include <windows.h>
 
 #include <chrono>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using namespace exsearcher;
@@ -131,6 +133,291 @@ std::string formatBytes(uint64_t bytes) {
     return std::string(buf);
 }
 
+// ---------------------------------------------------------------------------
+// --watch <dir> test mode.
+//
+// Crawls <dir> into an index, then runs ReadDirectoryChangesW on it and applies
+// ADDED/REMOVED/MODIFIED/RENAMED events to the index live, printing each batch.
+// This exercises the exact RDCW parsing + path-map + tombstone/updateMeta logic
+// the app's Watcher/IndexController use, but headless so it can be driven from a
+// shell (create/delete/rename files, observe the printed events). Runs until a
+// line is read on stdin (or watchSeconds elapse, whichever first).
+//
+// Mirrors IndexController::applyWatcherBatch translation rules but inline, since
+// the controller is Qt-side and the CLI is core-only.
+// ---------------------------------------------------------------------------
+
+// Lowercased, separator-trimmed dir-path key (matches IndexController::dirKey).
+std::wstring dirKeyW(std::wstring p) {
+    while (!p.empty() && (p.back() == L'\\' || p.back() == L'/'))
+        p.pop_back();
+    // Lowercase via LCMapStringEx invariant fold.
+    if (!p.empty()) {
+        int n = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, p.c_str(),
+                              static_cast<int>(p.size()), nullptr, 0, nullptr,
+                              nullptr, 0);
+        if (n > 0) {
+            std::wstring out(static_cast<size_t>(n), L'\0');
+            LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, p.c_str(),
+                          static_cast<int>(p.size()), out.data(), n, nullptr,
+                          nullptr, 0);
+            return out;
+        }
+    }
+    return p;
+}
+
+int runWatch(const std::wstring& dir, int watchSeconds) {
+    Index index;
+    {
+        CrawlIndexer crawler(index);
+        printLine("Crawling " + utf16ToUtf8(dir) + " ...");
+        CrawlStats stats = crawler.crawl({dir});
+        char buf[256];
+        snprintf(buf, sizeof(buf), "Indexed %llu files, %llu dirs",
+                 static_cast<unsigned long long>(stats.totalFiles),
+                 static_cast<unsigned long long>(stats.totalDirs));
+        printLine(buf);
+    }
+
+    // Build the lowercased-dir-path -> idx map (directories only).
+    std::unordered_map<std::wstring, uint32_t> dirMap;
+    auto rebuildMap = [&] {
+        dirMap.clear();
+        const auto& es = index.entries();
+        for (size_t i = 0; i < es.size(); ++i) {
+            if ((es[i].attr & FILE_ATTRIBUTE_DIRECTORY) == 0)
+                continue;
+            if (es[i].attr & kAttrTombstone)
+                continue;
+            std::wstring full = utf8ToUtf16(index.fullPath(static_cast<uint32_t>(i)));
+            dirMap[dirKeyW(full)] = static_cast<uint32_t>(i);
+        }
+    };
+    rebuildMap();
+
+    // The watch root path (no trailing sep) for joining relative event paths.
+    std::wstring rootPath = dir;
+    while (!rootPath.empty() &&
+           (rootPath.back() == L'\\' || rootPath.back() == L'/'))
+        rootPath.pop_back();
+
+    HANDLE h = CreateFileW(
+        (rootPath + L"\\").c_str(), FILE_LIST_DIRECTORY,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+        nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        printLine("Cannot open directory for watching.");
+        return 1;
+    }
+
+    OVERLAPPED ov{};
+    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const DWORD filter = FILE_NOTIFY_CHANGE_FILE_NAME |
+                         FILE_NOTIFY_CHANGE_DIR_NAME |
+                         FILE_NOTIFY_CHANGE_LAST_WRITE |
+                         FILE_NOTIFY_CHANGE_SIZE;
+    std::vector<char> buffer(64 * 1024);
+
+    printLine("Watching... (run for ~" + std::to_string(watchSeconds) +
+              "s; create/delete/rename files now)");
+
+    using clock = std::chrono::steady_clock;
+    const auto deadline = clock::now() + std::chrono::seconds(watchSeconds);
+
+    while (clock::now() < deadline) {
+        ResetEvent(ov.hEvent);
+        DWORD br = 0;
+        if (!ReadDirectoryChangesW(h, buffer.data(),
+                                   static_cast<DWORD>(buffer.size()), TRUE,
+                                   filter, &br, &ov, nullptr)) {
+            printLine("ReadDirectoryChangesW failed -> would schedule rescan");
+            break;
+        }
+        const auto remain = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                deadline - clock::now())
+                                .count();
+        DWORD waitMs = remain > 0 ? static_cast<DWORD>(remain) : 0;
+        DWORD wr = WaitForSingleObject(ov.hEvent, waitMs);
+        if (wr == WAIT_TIMEOUT) {
+            CancelIo(h);
+            DWORD dummy = 0;
+            GetOverlappedResult(h, &ov, &dummy, TRUE);
+            break;
+        }
+        DWORD transferred = 0;
+        if (!GetOverlappedResult(h, &ov, &transferred, FALSE) ||
+            transferred == 0) {
+            printLine("** buffer overflow / zero-length -> schedule full rescan **");
+            continue;
+        }
+
+        bool structural = false;
+        size_t offset = 0;
+        for (;;) {
+            auto* fni =
+                reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buffer.data() + offset);
+            std::wstring rel(fni->FileName, fni->FileNameLength / sizeof(wchar_t));
+            std::wstring full = rootPath + L"\\" + rel;
+
+            // Split rel into parent + leaf.
+            size_t slash = rel.find_last_of(L'\\');
+            std::wstring parentRel =
+                (slash == std::wstring::npos) ? L"" : rel.substr(0, slash);
+            std::wstring leaf =
+                (slash == std::wstring::npos) ? rel : rel.substr(slash + 1);
+            std::wstring parentFull =
+                parentRel.empty() ? rootPath : (rootPath + L"\\" + parentRel);
+
+            const char* actName = "?";
+            switch (fni->Action) {
+                case FILE_ACTION_ADDED: actName = "ADDED"; break;
+                case FILE_ACTION_REMOVED: actName = "REMOVED"; break;
+                case FILE_ACTION_MODIFIED: actName = "MODIFIED"; break;
+                case FILE_ACTION_RENAMED_OLD_NAME: actName = "RENAMED_OLD"; break;
+                case FILE_ACTION_RENAMED_NEW_NAME: actName = "RENAMED_NEW"; break;
+                default: actName = "OTHER"; break;
+            }
+            std::string applied = "ignored";
+
+            if (fni->Action == FILE_ACTION_ADDED ||
+                fni->Action == FILE_ACTION_RENAMED_NEW_NAME) {
+                auto it = dirMap.find(dirKeyW(parentFull));
+                if (it != dirMap.end()) {
+                    WIN32_FILE_ATTRIBUTE_DATA fad{};
+                    if (GetFileAttributesExW(full.c_str(), GetFileExInfoStandard,
+                                             &fad)) {
+                        PendingEntry pe;
+                        pe.name = utf16ToUtf8(leaf);
+                        std::string low = utf16ToUtf8(dirKeyW(leaf));
+                        pe.nameLower =
+                            (low.size() == pe.name.size()) ? low : pe.name;
+                        pe.parentIdx = it->second;
+                        pe.size = (static_cast<uint64_t>(fad.nFileSizeHigh) << 32) |
+                                  fad.nFileSizeLow;
+                        pe.mtime = (static_cast<uint64_t>(
+                                        fad.ftLastWriteTime.dwHighDateTime)
+                                    << 32) |
+                                   fad.ftLastWriteTime.dwLowDateTime;
+                        pe.attr = fad.dwFileAttributes;
+                        uint32_t newIdx = index.appendOne(pe);
+                        structural = true;
+                        if (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                            dirMap[dirKeyW(full)] = newIdx;
+                        applied = "appended idx " + std::to_string(newIdx);
+                    } else {
+                        applied = "stat failed (gone)";
+                    }
+                } else {
+                    applied = "parent unknown -> ignore";
+                }
+            } else if (fni->Action == FILE_ACTION_REMOVED ||
+                       fni->Action == FILE_ACTION_RENAMED_OLD_NAME) {
+                auto dit = dirMap.find(dirKeyW(full));
+                if (dit != dirMap.end()) {
+                    uint32_t dirIdx = dit->second;
+                    const auto& es = index.entries();
+                    std::vector<uint8_t> drop(es.size(), 0);
+                    if (dirIdx < es.size())
+                        drop[dirIdx] = 1;
+                    for (size_t i = dirIdx; i < es.size(); ++i) {
+                        uint32_t p = es[i].parentIdx;
+                        if (p != Index::kNoParent && p < drop.size() && drop[p])
+                            drop[i] = 1;
+                    }
+                    size_t cnt = 0;
+                    for (size_t i = 0; i < drop.size(); ++i)
+                        if (drop[i]) { index.markDeleted(static_cast<uint32_t>(i)); ++cnt; }
+                    dirMap.erase(dirKeyW(full));
+                    structural = true;
+                    applied = "tombstoned dir + " + std::to_string(cnt - 1) +
+                              " descendants";
+                } else {
+                    auto pit = dirMap.find(dirKeyW(parentFull));
+                    if (pit != dirMap.end()) {
+                        std::wstring leafLow = dirKeyW(leaf);
+                        uint32_t parentIdx = pit->second;
+                        const auto& es = index.entries();
+                        bool found = false;
+                        for (size_t i = parentIdx + 1; i < es.size(); ++i) {
+                            if (es[i].parentIdx != parentIdx)
+                                continue;
+                            if (index.isDeleted(static_cast<uint32_t>(i)))
+                                continue;
+                            std::wstring nm =
+                                utf8ToUtf16(index.name(static_cast<uint32_t>(i)));
+                            if (dirKeyW(nm) == leafLow) {
+                                index.markDeleted(static_cast<uint32_t>(i));
+                                structural = true;
+                                found = true;
+                                applied = "tombstoned file idx " + std::to_string(i);
+                                break;
+                            }
+                        }
+                        if (!found)
+                            applied = "not found under parent";
+                    } else {
+                        applied = "parent unknown -> ignore";
+                    }
+                }
+            } else if (fni->Action == FILE_ACTION_MODIFIED) {
+                auto pit = dirMap.find(dirKeyW(parentFull));
+                if (pit != dirMap.end()) {
+                    WIN32_FILE_ATTRIBUTE_DATA fad{};
+                    if (GetFileAttributesExW(full.c_str(), GetFileExInfoStandard,
+                                             &fad)) {
+                        std::wstring leafLow = dirKeyW(leaf);
+                        uint32_t parentIdx = pit->second;
+                        const auto& es = index.entries();
+                        for (size_t i = parentIdx + 1; i < es.size(); ++i) {
+                            if (es[i].parentIdx != parentIdx)
+                                continue;
+                            std::wstring nm =
+                                utf8ToUtf16(index.name(static_cast<uint32_t>(i)));
+                            if (dirKeyW(nm) == leafLow) {
+                                uint64_t sz = (static_cast<uint64_t>(
+                                                   fad.nFileSizeHigh)
+                                               << 32) |
+                                              fad.nFileSizeLow;
+                                uint64_t mt = (static_cast<uint64_t>(
+                                                   fad.ftLastWriteTime.dwHighDateTime)
+                                               << 32) |
+                                              fad.ftLastWriteTime.dwLowDateTime;
+                                index.updateMeta(static_cast<uint32_t>(i), sz, mt);
+                                applied = "updateMeta idx " + std::to_string(i) +
+                                          " size " + std::to_string(sz);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            printLine(std::string("  [") + actName + "] " + utf16ToUtf8(rel) +
+                      "  -> " + applied);
+
+            if (fni->NextEntryOffset == 0)
+                break;
+            offset += fni->NextEntryOffset;
+            if (offset >= buffer.size())
+                break;
+        }
+
+        if (structural)
+            printLine("  (batch applied; entries now " +
+                      std::to_string(index.size()) + ", tombstones " +
+                      std::to_string(index.tombstoneCount()) + ")");
+    }
+
+    CloseHandle(ov.hEvent);
+    CloseHandle(h);
+
+    printLine("Watch ended. Final entries " + std::to_string(index.size()) +
+              ", tombstones " + std::to_string(index.tombstoneCount()) + ".");
+    return 0;
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -144,13 +431,17 @@ int wmain(int argc, wchar_t** argv) {
     if (argc < 2) {
         printLine("Usage: exsearcher-cli [--save <file>] <root> [<root>...]");
         printLine("       exsearcher-cli --load <file>");
+        printLine("       exsearcher-cli --watch <dir> [--seconds N]");
         return 1;
     }
 
     // Parse flags: --save <file> (crawl then save), --load <file> (load instead
-    // of crawl). Remaining args are root paths.
+    // of crawl), --watch <dir> (crawl + RDCW live-update test). Remaining args
+    // are root paths.
     std::wstring saveFile;
     std::wstring loadFile;
+    std::wstring watchDir;
+    int watchSeconds = 30;
     std::vector<std::wstring> roots;
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
@@ -158,10 +449,17 @@ int wmain(int argc, wchar_t** argv) {
             saveFile = argv[++i];
         } else if (a == L"--load" && i + 1 < argc) {
             loadFile = argv[++i];
+        } else if (a == L"--watch" && i + 1 < argc) {
+            watchDir = argv[++i];
+        } else if (a == L"--seconds" && i + 1 < argc) {
+            watchSeconds = _wtoi(argv[++i]);
         } else {
             roots.emplace_back(a);
         }
     }
+
+    if (!watchDir.empty())
+        return runWatch(watchDir, watchSeconds > 0 ? watchSeconds : 30);
 
     Index index;
 
@@ -245,7 +543,9 @@ int wmain(int argc, wchar_t** argv) {
             printLine("Snapshot save FAILED.");
     }
 
-    SearchEngine engine(index);
+    // engine is rebuilt after mutations (!compact / !merge); a unique_ptr lets
+    // us replace it since SearchEngine holds a const Index& and isn't assignable.
+    auto engine = std::make_unique<SearchEngine>(index);
 
     for (;;) {
         printU8("> ");
@@ -272,10 +572,73 @@ int wmain(int argc, wchar_t** argv) {
                       std::to_string(index.size()) + " entries");
             continue;
         }
+        // Tombstone a single entry by index (sets the kAttrTombstone bit).
+        if (line.rfind(L"!tombstone ", 0) == 0) {
+            const uint32_t r =
+                static_cast<uint32_t>(_wtoi(line.c_str() + 11));
+            index.markDeleted(r);
+            printLine("tombstoned entry " + std::to_string(r) +
+                      "; tombstones now " +
+                      std::to_string(index.tombstoneCount()));
+            continue;
+        }
+        // Physically drop tombstoned entries + cascade (same rule as save).
+        if (line == L"!compact") {
+            const size_t removed = index.compactTombstones();
+            printLine("compacted: removed " + std::to_string(removed) +
+                      " entries; now " + std::to_string(index.size()));
+            // Rebuild the engine so subsequent searches use the new arrays.
+            engine = std::make_unique<SearchEngine>(index);
+            continue;
+        }
+        // Merge another snapshot file into this index via appendIndex.
+        if (line.rfind(L"!merge ", 0) == 0) {
+            std::wstring f = line.substr(7);
+            Index other;
+            std::vector<RootMeta> otherRoots;
+            if (!loadSnapshot(other, otherRoots, f)) {
+                printLine("merge load failed: cannot open " + utf16ToUtf8(f));
+                continue;
+            }
+            const size_t before = index.size();
+            index.appendIndex(other);
+            engine = std::make_unique<SearchEngine>(index);
+            printLine("merged " + std::to_string(other.size()) +
+                      " entries (was " + std::to_string(before) + ", now " +
+                      std::to_string(index.size()) + ")");
+            continue;
+        }
+        // Count entries / tombstones for round-trip verification.
+        if (line == L"!stats") {
+            printLine("entries " + std::to_string(index.size()) +
+                      ", tombstones " + std::to_string(index.tombstoneCount()));
+            continue;
+        }
+        // Save the current index to a file (compacts tombstones on write).
+        if (line.rfind(L"!save ", 0) == 0) {
+            std::wstring f = line.substr(6);
+            std::vector<RootMeta> rms;
+            FILETIME ft;
+            GetSystemTimeAsFileTime(&ft);
+            const uint64_t nowFt = (static_cast<uint64_t>(ft.dwHighDateTime)
+                                    << 32) | ft.dwLowDateTime;
+            const auto& es = index.entries();
+            for (size_t i = 0; i < es.size(); ++i) {
+                if (es[i].parentIdx == Index::kNoParent) {
+                    RootMeta rm;
+                    rm.rootEntryIdx = static_cast<uint32_t>(i);
+                    rm.crawledAtFiletime = nowFt;
+                    rm.rootPathU8 = index.name(static_cast<uint32_t>(i));
+                    rms.push_back(std::move(rm));
+                }
+            }
+            printLine(saveSnapshot(index, rms, f) ? "saved." : "save FAILED.");
+            continue;
+        }
 
         using clock = std::chrono::steady_clock;
         const auto t0 = clock::now();
-        SearchResult res = engine.search(line, 50);
+        SearchResult res = engine->search(line, 50);
         const auto t1 = clock::now();
         const double ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count();

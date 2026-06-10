@@ -86,6 +86,11 @@ SearchResult SearchEngine::search(const std::wstring& query,
         threads = 1;
 
     auto nameMatches = [&](const FileEntry& fe) -> bool {
+        // Tombstoned (logically deleted) entries never match. Cheap branch on
+        // the already-loaded attr word; runs in both the single- and
+        // multi-threaded paths via this shared lambda.
+        if (fe.attr & kAttrTombstone)
+            return false;
         const char* name = lower + fe.nameOffset;
         const size_t len = fe.nameLen;
         for (const auto& tok : tokens)

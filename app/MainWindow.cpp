@@ -20,6 +20,7 @@
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QHeaderView>
 #include <QKeyEvent>
 #include <QLabel>
@@ -203,6 +204,7 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
 
     // --- Controller init ---
     controller_ = new IndexController(this);
+    controller_->setSettings(settings_);  // watchLocal / rescanMinutes
     model_ = new ResultsModel(this);
     model_->setIndex(&controller_->index());
 
@@ -256,6 +258,9 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     debounce_->setSingleShot(true);
     debounce_->setInterval(kDebounceMs);
 
+    // --- Crawl ETA wall clock ---
+    crawlTimer_ = new QElapsedTimer();
+
     // --- Connections ---
     connect(search_, &QLineEdit::textChanged, this,
             &MainWindow::onSearchTextChanged);
@@ -282,6 +287,21 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     connect(controller_, &IndexController::searchReady, this,
             &MainWindow::onSearchReady, Qt::QueuedConnection);
 
+    // --- System tray: the app keeps indexing in the background; closing the
+    // window hides it, and quitting is only offered from the tray menu. ---
+    tray_ = new QSystemTrayIcon(QIcon(QStringLiteral(":/icon256.png")), this);
+    tray_->setToolTip(QStringLiteral("exsearcher"));
+    auto* trayMenu = new QMenu(this);
+    QAction* actShow = trayMenu->addAction(QStringLiteral("열기"));
+    trayMenu->addSeparator();
+    QAction* actQuit = trayMenu->addAction(QStringLiteral("종료"));
+    tray_->setContextMenu(trayMenu);
+    connect(actShow, &QAction::triggered, this, &MainWindow::showFromTray);
+    connect(actQuit, &QAction::triggered, this, &MainWindow::quitFromTray);
+    connect(tray_, &QSystemTrayIcon::activated, this,
+            &MainWindow::onTrayActivated);
+    tray_->show();
+
     // --- Load snapshot (no auto-crawl) ---
     const bool loaded = controller_->loadSnapshot();
     indexReady_ = loaded;
@@ -290,7 +310,9 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     search_->setFocus();
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() {
+    delete crawlTimer_;
+}
 
 int MainWindow::titleBarHeight() const {
     // titleBar_ is 40 logical px.  For the NCHITTEST calculations in physical
@@ -307,8 +329,44 @@ void MainWindow::changeEvent(QEvent* event) {
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     settings_->setValue("window/geometry", saveGeometry());
+
+    // Window close hides to the tray; indexing/watching keeps running.
+    // A real exit happens only through the tray menu (quitting_).
+    if (!quitting_ && tray_ && tray_->isVisible()) {
+        hide();
+        if (!settings_->value("tray/hintShown", false).toBool()) {
+            settings_->setValue("tray/hintShown", true);
+            tray_->showMessage(
+                QStringLiteral("exsearcher"),
+                QStringLiteral("백그라운드에서 색인을 유지합니다. "
+                               "종료는 트레이 아이콘 우클릭 → 종료."),
+                QSystemTrayIcon::Information, 4000);
+        }
+        event->ignore();
+        return;
+    }
+
     controller_->shutdown();
     event->accept();
+}
+
+void MainWindow::onTrayActivated(QSystemTrayIcon::ActivationReason reason) {
+    if (reason == QSystemTrayIcon::Trigger ||
+        reason == QSystemTrayIcon::DoubleClick)
+        showFromTray();
+}
+
+void MainWindow::showFromTray() {
+    show();
+    setWindowState(windowState() & ~Qt::WindowMinimized);
+    raise();
+    activateWindow();
+}
+
+void MainWindow::quitFromTray() {
+    quitting_ = true;
+    close();
+    QApplication::quit();
 }
 
 // ---------------------------------------------------------------------------
@@ -553,6 +611,36 @@ void MainWindow::setBusyUi(const QString& statusText) {
     progress_->setValue(0);
     progress_->setVisible(true);
     status_->setText(statusText);
+    resetCrawlEta();
+}
+
+void MainWindow::resetCrawlEta() {
+    dirsPerSecEma_ = 0.0;
+    etaLastDirsDone_ = 0;
+    etaLastMs_ = 0;
+    if (crawlTimer_)
+        crawlTimer_->restart();
+}
+
+QString MainWindow::crawlEtaText(quint64 dirsDone, quint64 dirsPending) const {
+    // Until the BFS queue estimate has had time to converge (≥10 s elapsed AND
+    // ≥3% done) show a non-committal placeholder rather than a wild number.
+    const qint64 elapsedMs = crawlTimer_ ? crawlTimer_->elapsed() : 0;
+    const quint64 totalDirs = dirsDone + dirsPending;
+    const int pct =
+        totalDirs > 0 ? static_cast<int>((dirsDone * 100) / totalDirs) : 0;
+    if (elapsedMs < 10'000 || pct < 3 || dirsPerSecEma_ <= 0.0)
+        return QStringLiteral("예상 중…");
+
+    const double remainSec =
+        static_cast<double>(dirsPending) / dirsPerSecEma_;
+    if (remainSec < 10.0)
+        return QStringLiteral("잠시 후 완료");
+    if (remainSec < 90.0)
+        return QStringLiteral("약 %1초 남음")
+            .arg(static_cast<int>(remainSec + 0.5));
+    const int mins = static_cast<int>((remainSec / 60.0) + 0.5);
+    return QStringLiteral("약 %1분 남음").arg(mins);
 }
 
 // ---------------------------------------------------------------------------
@@ -584,8 +672,15 @@ void MainWindow::runSearch() {
 
 void MainWindow::onProgress(quint64 entries, quint64 dirsDone,
                             quint64 dirsPending, QString currentDir) {
-    if (indexReady_)
+    // During a blocking crawl indexReady_ is false; during a non-blocking
+    // rescan it stays true. rescanLive_ tracks a user-started rescan; an
+    // autonomous periodic network rescan shows up via controller_->rescanning().
+    // Only suppress progress when truly idle (nothing in flight).
+    if (indexReady_ && !rescanLive_ && !controller_->rescanning())
         return;
+    if (controller_->rescanning())
+        rescanLive_ = true;  // pick up an autonomous rescan for the suffix
+
     const quint64 totalDirs = dirsDone + dirsPending;
     int pct = 0;
     if (totalDirs > 0)
@@ -594,21 +689,40 @@ void MainWindow::onProgress(quint64 entries, quint64 dirsDone,
         pct = 99;
     progress_->setValue(pct);
 
+    // Update the dirs/sec EMA (alpha ~0.2) from the delta since the last sample.
+    const qint64 nowMs = crawlTimer_ ? crawlTimer_->elapsed() : 0;
+    const qint64 dtMs = nowMs - etaLastMs_;
+    if (dtMs > 0 && dirsDone >= etaLastDirsDone_) {
+        const double inst =
+            static_cast<double>(dirsDone - etaLastDirsDone_) /
+            (static_cast<double>(dtMs) / 1000.0);
+        constexpr double kAlpha = 0.2;
+        dirsPerSecEma_ = (dirsPerSecEma_ <= 0.0)
+                             ? inst
+                             : (kAlpha * inst + (1.0 - kAlpha) * dirsPerSecEma_);
+        etaLastDirsDone_ = dirsDone;
+        etaLastMs_ = nowMs;
+    }
+
     const QString cur = elideMiddle(currentDir, 60);
     const QString prefix =
         crawlingLetter_.isEmpty() ? QString() : (crawlingLetter_ + QStringLiteral(": "));
+    const QString eta = crawlEtaText(dirsDone, dirsPending);
+    const QString suffix =
+        rescanLive_ ? QStringLiteral(" (검색 가능)") : QString();
     status_->setText(
-        QStringLiteral("%1색인 중 — 항목 %2 · 폴더 %3/~%4 (%5%) · 현재: %6")
+        QStringLiteral("%1색인 중 — 항목 %2 · %3%% · %4 · 현재: %5%6")
             .arg(prefix)
             .arg(entries)
-            .arg(dirsDone)
-            .arg(totalDirs)
             .arg(pct)
-            .arg(cur));
+            .arg(eta)
+            .arg(cur)
+            .arg(suffix));
 }
 
 void MainWindow::onIndexingDone(quint64 files, quint64 dirs, quint64 elapsedMs) {
     indexReady_ = true;
+    rescanLive_ = false;
     crawlingLetter_.clear();
     progress_->setValue(100);
     progress_->setVisible(false);
@@ -681,16 +795,34 @@ void MainWindow::onCrawlRequested(const QString& letter) {
     if (controller_->busy())
         return;
     crawlingLetter_ = letter;
-    setBusyUi(QStringLiteral("%1: 색인 중…").arg(letter));
     controller_->crawlDrive(letter);
+    // The controller chooses blocking (first-ever index) vs non-blocking
+    // (append while others are indexed). Reflect that in the UI.
+    if (controller_->rescanning()) {
+        rescanLive_ = true;
+        resetCrawlEta();
+        progress_->setValue(0);
+        progress_->setVisible(true);
+        status_->setText(QStringLiteral("%1: 색인 중… (검색 가능)").arg(letter));
+    } else {
+        setBusyUi(QStringLiteral("%1: 색인 중…").arg(letter));
+    }
 }
 
 void MainWindow::onRecrawlDriveRequested(const QString& letter) {
     if (controller_->busy())
         return;
     crawlingLetter_ = letter;
-    setBusyUi(QStringLiteral("%1: 재색인 중…").arg(letter));
     controller_->recrawlDrives({letter});
+    if (controller_->rescanning()) {
+        rescanLive_ = true;
+        resetCrawlEta();
+        progress_->setValue(0);
+        progress_->setVisible(true);
+        status_->setText(QStringLiteral("%1: 재색인 중… (검색 가능)").arg(letter));
+    } else {
+        setBusyUi(QStringLiteral("%1: 재색인 중…").arg(letter));
+    }
 }
 
 void MainWindow::onRemoveDriveRequested(const QString& letter) {
@@ -712,8 +844,16 @@ void MainWindow::onReindexAllRequested() {
     if (indexed.isEmpty())
         return;
     crawlingLetter_.clear();
-    setBusyUi(QStringLiteral("전체 재색인 중…"));
     controller_->recrawlDrives(indexed);
+    if (controller_->rescanning()) {
+        rescanLive_ = true;
+        resetCrawlEta();
+        progress_->setValue(0);
+        progress_->setVisible(true);
+        status_->setText(QStringLiteral("전체 재색인 중… (검색 가능)"));
+    } else {
+        setBusyUi(QStringLiteral("전체 재색인 중…"));
+    }
 }
 
 // ---------------------------------------------------------------------------

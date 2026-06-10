@@ -44,6 +44,8 @@ qt_add_executable(exsearcher WIN32
     app/IndexController.h
     app/DriveChipBar.cpp
     app/DriveChipBar.h
+    app/Watcher.cpp
+    app/Watcher.h
 )
 # AUTORCC is required for app/resources.qrc — without it the qrc is silently
 # treated as an inert file and :/style.qss + :/icon256.png don't exist at

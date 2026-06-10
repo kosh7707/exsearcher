@@ -1,11 +1,13 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QSystemTrayIcon>
 #include <QVector>
 
 #include <cstdint>
 #include <vector>
 
+class QElapsedTimer;
 class QLineEdit;
 class QTableView;
 class QTimer;
@@ -79,6 +81,11 @@ private slots:
     void onMaximizeClicked();
     void onCloseClicked();
 
+    // Tray.
+    void onTrayActivated(QSystemTrayIcon::ActivationReason reason);
+    void showFromTray();
+    void quitFromTray();
+
 private:
     void openEntry(quint32 entryId);
     void openContainingFolder(quint32 entryId);
@@ -107,10 +114,26 @@ private:
     IndexController* controller_ = nullptr;
     ResultsModel*    model_      = nullptr;
     QSettings*       settings_   = nullptr;
+    QSystemTrayIcon* tray_       = nullptr;
+
+    // True only when exiting via the tray menu; closeEvent then really quits
+    // instead of hiding to the tray.
+    bool quitting_ = false;
 
     bool     indexReady_    = false;
     quint64  searchSeq_     = 0;    // increments per dispatched query
     quint64  lastShownSeq_  = 0;    // newest seq whose result is displayed
 
     QString crawlingLetter_;  // drive currently being crawled (for status text)
+
+    // ETA estimation during crawl. We keep an EMA of dirs-per-second sampled per
+    // progress signal and divide pending dirs by it. Reset at each crawl start.
+    void resetCrawlEta();
+    QString crawlEtaText(quint64 dirsDone, quint64 dirsPending) const;
+
+    QElapsedTimer* crawlTimer_ = nullptr;  // wall time since crawl start
+    double   dirsPerSecEma_ = 0.0;         // smoothed crawl rate
+    quint64  etaLastDirsDone_ = 0;         // dirsDone at last sample
+    qint64   etaLastMs_ = 0;               // elapsed ms at last sample
+    bool     rescanLive_ = false;          // non-blocking rescan in progress
 };

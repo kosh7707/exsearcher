@@ -36,6 +36,48 @@ uint32_t Index::appendOne(const PendingEntry& e) {
     return appendBatch(batch);
 }
 
+void Index::appendIndex(const Index& other) {
+    if (other.entries_.empty())
+        return;
+
+    std::lock_guard<std::mutex> lk(mutex_);
+    const uint32_t offset = static_cast<uint32_t>(entries_.size());
+    const uint32_t nameBase = static_cast<uint32_t>(nameBuf_.size());
+
+    // Append name buffers wholesale; offsets shift by nameBase.
+    nameBuf_.append(other.nameBuf_);
+    nameLowerBuf_.append(other.nameLowerBuf_);
+
+    entries_.reserve(entries_.size() + other.entries_.size());
+    for (const FileEntry& fe : other.entries_) {
+        FileEntry ne = fe;
+        ne.nameOffset = fe.nameOffset + nameBase;
+        ne.parentIdx =
+            (fe.parentIdx == kNoParent) ? kNoParent : fe.parentIdx + offset;
+        if (ne.attr & kAttrTombstone)
+            ++tombstoneCount_;
+        entries_.push_back(ne);
+    }
+}
+
+void Index::updateMeta(uint32_t idx, uint64_t size, uint64_t mtime) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (idx >= entries_.size())
+        return;
+    entries_[idx].size = size;
+    entries_[idx].mtime = mtime;
+}
+
+void Index::markDeleted(uint32_t idx) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (idx >= entries_.size())
+        return;
+    if ((entries_[idx].attr & kAttrTombstone) == 0) {
+        entries_[idx].attr |= kAttrTombstone;
+        ++tombstoneCount_;
+    }
+}
+
 std::string Index::name(uint32_t idx) const {
     const FileEntry& fe = entries_[idx];
     return nameBuf_.substr(fe.nameOffset, fe.nameLen);
@@ -81,38 +123,44 @@ void Index::restore(std::vector<FileEntry>&& entries, std::string&& names,
     entries_ = std::move(entries);
     nameBuf_ = std::move(names);
     nameLowerBuf_ = std::move(lower);
+    // A snapshot is saved already-compacted (tombstones dropped), so a freshly
+    // loaded index normally has none; recount defensively in case a caller
+    // restores arrays it built itself.
+    tombstoneCount_ = 0;
+    for (const FileEntry& fe : entries_)
+        if (fe.attr & kAttrTombstone)
+            ++tombstoneCount_;
 }
 
-void Index::removeRoot(uint32_t rootIdx) {
-    std::lock_guard<std::mutex> lk(mutex_);
-
+size_t Index::compactImpl(
+    const std::function<bool(size_t i, bool parentDropped)>& drop) {
     const size_t oldCount = entries_.size();
-    if (rootIdx >= oldCount)
-        return;
 
-    // First pass: decide which entries to keep. An entry is kept when walking
-    // its parentIdx chain does NOT terminate at rootIdx. Walking per-entry would
-    // be O(n*depth); instead compute "removed" with a single forward pass since
-    // parents always precede children in append order (BFS / root-first).
+    // First pass: decide which entries to drop. A single forward pass suffices
+    // because parents always precede children in append order (BFS / root-first
+    // / appendIndex preserves it), so a parent's "dropped" decision is already
+    // known when we reach a child. The predicate gets whether its parent was
+    // dropped to implement the cascade rule.
     std::vector<uint8_t> removed(oldCount, 0);
+    size_t removedCount = 0;
     for (size_t i = 0; i < oldCount; ++i) {
         const FileEntry& fe = entries_[i];
-        if (i == rootIdx) {
+        const bool parentDropped =
+            (fe.parentIdx != kNoParent) && removed[fe.parentIdx] != 0;
+        if (drop(i, parentDropped)) {
             removed[i] = 1;
-        } else if (fe.parentIdx != kNoParent && removed[fe.parentIdx]) {
-            // Parent was removed => this descendant is removed too. Relies on
-            // parentIdx < i for all non-root entries (guaranteed by crawl/load
-            // ordering: a directory is appended before its children).
-            removed[i] = 1;
+            ++removedCount;
         }
     }
+    if (removedCount == 0)
+        return 0;
 
     // Build old->new index map and rebuild buffers for the survivors.
     std::vector<uint32_t> remap(oldCount, kNoParent);
     std::vector<FileEntry> newEntries;
     std::string newNames;
     std::string newLower;
-    newEntries.reserve(oldCount);
+    newEntries.reserve(oldCount - removedCount);
     newNames.reserve(nameBuf_.size());
     newLower.reserve(nameLowerBuf_.size());
 
@@ -124,8 +172,7 @@ void Index::removeRoot(uint32_t rootIdx) {
         ne.nameOffset = static_cast<uint32_t>(newNames.size());
         newNames.append(nameBuf_.data() + fe.nameOffset, fe.nameLen);
         newLower.append(nameLowerBuf_.data() + fe.nameOffset, fe.nameLen);
-        // parentIdx remapped below once the full map is known. Store old parent
-        // for now; we resolve in a second pass.
+        // parentIdx remapped below once the full map is known.
         remap[i] = static_cast<uint32_t>(newEntries.size());
         newEntries.push_back(ne);
     }
@@ -143,6 +190,35 @@ void Index::removeRoot(uint32_t rootIdx) {
     entries_ = std::move(newEntries);
     nameBuf_ = std::move(newNames);
     nameLowerBuf_ = std::move(newLower);
+    return removedCount;
+}
+
+void Index::removeRoot(uint32_t rootIdx) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (rootIdx >= entries_.size())
+        return;
+
+    // Drop the target root and (via the cascade) everything under it.
+    compactImpl([rootIdx](size_t i, bool parentDropped) {
+        return i == rootIdx || parentDropped;
+    });
+    // Recount tombstones: any tombstoned survivor outside the removed root is
+    // still present, but the simplest correct thing is a fresh count.
+    tombstoneCount_ = 0;
+    for (const FileEntry& fe : entries_)
+        if (fe.attr & kAttrTombstone)
+            ++tombstoneCount_;
+}
+
+size_t Index::compactTombstones() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (tombstoneCount_ == 0)
+        return 0;
+    const size_t removed = compactImpl([this](size_t i, bool parentDropped) {
+        return (entries_[i].attr & kAttrTombstone) != 0 || parentDropped;
+    });
+    tombstoneCount_ = 0;  // every tombstoned entry (and orphan) is now gone
+    return removed;
 }
 
 } // namespace exsearcher
