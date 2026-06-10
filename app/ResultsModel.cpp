@@ -10,7 +10,9 @@
 #endif
 #include <windows.h>
 
+#include <QColor>
 #include <QDateTime>
+#include <QFileInfo>
 
 namespace {
 
@@ -52,6 +54,9 @@ QString parentDir(const QString& fullPath) {
     return fullPath.left(pos);
 }
 
+// Muted gray for secondary columns (path, size, date).
+const QColor kSecondaryColor{0x4A, 0x55, 0x68};
+
 } // namespace
 
 ResultsModel::ResultsModel(QObject* parent) : QAbstractTableModel(parent) {}
@@ -86,6 +91,41 @@ int ResultsModel::columnCount(const QModelIndex& parent) const {
     return ColumnCount;
 }
 
+QIcon ResultsModel::iconForEntry(quint32 id) const {
+    if (!index_)
+        return QIcon();
+
+    const exsearcher::FileEntry& fe = index_->entry(id);
+    const bool isDir = (fe.attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+    if (isDir) {
+        auto it = iconCache_.find(QStringLiteral("."));
+        if (it != iconCache_.end())
+            return it.value();
+        QIcon icon = iconProvider_.icon(QFileIconProvider::Folder);
+        iconCache_[QStringLiteral(".")] = icon;
+        return icon;
+    }
+
+    // Extract extension from entry name (lowercase key for cache).
+    const QString nameStr = QString::fromStdString(index_->name(id));
+    const int dotPos = nameStr.lastIndexOf('.');
+    const QString ext = (dotPos >= 0)
+        ? nameStr.mid(dotPos).toLower()
+        : QStringLiteral("*");
+
+    auto it = iconCache_.find(ext);
+    if (it != iconCache_.end())
+        return it.value();
+
+    // Use a dummy QFileInfo with the extension to query the shell icon.
+    // This avoids hitting the actual file path (which may not exist or be slow).
+    QFileInfo fi(QStringLiteral("dummy") + ext);
+    QIcon icon = iconProvider_.icon(fi);
+    iconCache_[ext] = icon;
+    return icon;
+}
+
 QVariant ResultsModel::data(const QModelIndex& index, int role) const {
     if (!index.isValid() || !index_)
         return QVariant();
@@ -101,6 +141,20 @@ QVariant ResultsModel::data(const QModelIndex& index, int role) const {
         if (index.column() == ColSize)
             return int(Qt::AlignRight | Qt::AlignVCenter);
         return int(Qt::AlignLeft | Qt::AlignVCenter);
+    }
+
+    if (role == Qt::ForegroundRole) {
+        // Dim secondary columns.
+        if (index.column() == ColPath || index.column() == ColSize ||
+            index.column() == ColModified)
+            return kSecondaryColor;
+        return QVariant();
+    }
+
+    if (role == Qt::DecorationRole) {
+        if (index.column() == ColName)
+            return iconForEntry(id);
+        return QVariant();
     }
 
     if (role != Qt::DisplayRole)

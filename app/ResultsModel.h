@@ -1,6 +1,9 @@
 #pragma once
 
 #include <QAbstractTableModel>
+#include <QFileIconProvider>
+#include <QHash>
+#include <QIcon>
 #include <QVector>
 
 #include <cstdint>
@@ -37,6 +40,13 @@ public:
                         int role) const override;
 
 private:
+    QIcon iconForEntry(quint32 id) const;
+
     const exsearcher::Index* index_ = nullptr;
     QVector<quint32> rows_;
+
+    // Icon cache: keyed by extension (lowercase) for files, "." for directories.
+    // QFileIconProvider shell calls are expensive — cache per extension.
+    mutable QFileIconProvider iconProvider_;
+    mutable QHash<QString, QIcon> iconCache_;
 };

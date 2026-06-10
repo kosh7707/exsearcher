@@ -68,4 +68,11 @@ size_t Index::memoryBytes() const {
          + nameLowerBuf_.capacity();
 }
 
+uint32_t Index::rootOf(uint32_t idx) const {
+    uint32_t cur = idx;
+    while (entries_[cur].parentIdx != kNoParent)
+        cur = entries_[cur].parentIdx;
+    return cur;
+}
+
 } // namespace exsearcher

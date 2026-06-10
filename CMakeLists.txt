@@ -33,6 +33,7 @@ find_package(Qt6 COMPONENTS Widgets Concurrent REQUIRED)
 # unsigned executables (a bare exe with zero VERSIONINFO scores worst).
 qt_add_executable(exsearcher WIN32
     app/exsearcher.rc
+    app/resources.qrc
     app/main.cpp
     app/MainWindow.cpp
     app/MainWindow.h
@@ -40,9 +41,12 @@ qt_add_executable(exsearcher WIN32
     app/ResultsModel.h
     app/IndexController.cpp
     app/IndexController.h
+    app/DriveChipBar.cpp
+    app/DriveChipBar.h
 )
 set_target_properties(exsearcher PROPERTIES AUTOMOC ON)
-target_link_libraries(exsearcher PRIVATE exsearcher-core Qt6::Widgets Qt6::Concurrent)
+# dwmapi: dark titlebar via DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)
+target_link_libraries(exsearcher PRIVATE exsearcher-core Qt6::Widgets Qt6::Concurrent dwmapi)
 
 # --- deploy: stage exe + Qt runtime into build/dist/exsearcher/ ---
 # windeployqt copies Qt6 DLLs, platform plugin, and (with --compiler-runtime)

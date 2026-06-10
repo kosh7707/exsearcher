@@ -1,5 +1,8 @@
 #include <winver.h>
 
+// First icon resource becomes the Explorer/taskbar icon for unsigned apps.
+IDI_ICON1 ICON "icon.ico"
+
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     0,2,0,0
 PRODUCTVERSION  0,2,0,0

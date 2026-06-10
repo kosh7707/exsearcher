@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <thread>
+#include <unordered_set>
 
 namespace exsearcher {
 
@@ -51,7 +52,8 @@ std::vector<std::string> tokenize(const std::string& s) {
 SearchEngine::SearchEngine(const Index& index) : index_(index) {}
 
 SearchResult SearchEngine::search(const std::wstring& query,
-                                  uint32_t maxResults) const {
+                                  uint32_t maxResults,
+                                  const std::vector<uint32_t>* allowedRoots) const {
     SearchResult result;
 
     // Case-fold the query the same way names were folded during indexing.
@@ -67,6 +69,12 @@ SearchResult SearchEngine::search(const std::wstring& query,
         return result;
     const char* lower = index_.lowerData();
 
+    // Build fast lookup set for allowed roots once (empty allowedRoots = allow all).
+    std::unordered_set<uint32_t> rootSet;
+    const bool filterRoots = (allowedRoots != nullptr) && !allowedRoots->empty();
+    if (filterRoots)
+        rootSet.insert(allowedRoots->begin(), allowedRoots->end());
+
     unsigned threads = threadCount_;
     if (threads == 0) {
         unsigned hc = std::thread::hardware_concurrency();
@@ -77,7 +85,7 @@ SearchResult SearchEngine::search(const std::wstring& query,
     if (threads == 0)
         threads = 1;
 
-    auto matches = [&](const FileEntry& fe) -> bool {
+    auto nameMatches = [&](const FileEntry& fe) -> bool {
         const char* name = lower + fe.nameOffset;
         const size_t len = fe.nameLen;
         for (const auto& tok : tokens)
@@ -86,9 +94,15 @@ SearchResult SearchEngine::search(const std::wstring& query,
         return true;
     };
 
+    auto rootAllowed = [&](uint32_t idx) -> bool {
+        if (!filterRoots)
+            return true;
+        return rootSet.count(index_.rootOf(idx)) > 0;
+    };
+
     if (threads == 1) {
         for (size_t i = 0; i < total; ++i) {
-            if (matches(entries[i])) {
+            if (nameMatches(entries[i]) && rootAllowed(static_cast<uint32_t>(i))) {
                 ++result.totalMatches;
                 if (result.indices.size() < maxResults)
                     result.indices.push_back(static_cast<uint32_t>(i));
@@ -112,7 +126,7 @@ SearchResult SearchEngine::search(const std::wstring& query,
         pool.emplace_back([&, begin, end, t] {
             Chunk& c = chunks[t];
             for (size_t i = begin; i < end; ++i) {
-                if (matches(entries[i])) {
+                if (nameMatches(entries[i]) && rootAllowed(static_cast<uint32_t>(i))) {
                     ++c.count;
                     // Collect up to the cap per chunk; merge trims globally.
                     if (c.indices.size() < maxResults)

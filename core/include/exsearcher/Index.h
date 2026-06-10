@@ -60,6 +60,9 @@ public:
     // Approximate memory footprint: entries + both name buffers.
     size_t memoryBytes() const;
 
+    // Walk parentIdx chain to find the root entry (the one with kNoParent).
+    uint32_t rootOf(uint32_t idx) const;
+
 private:
     mutable std::mutex mutex_;
     std::vector<FileEntry> entries_;

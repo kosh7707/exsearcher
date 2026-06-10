@@ -4,6 +4,7 @@
 #include "exsearcher/CrawlIndexer.h"
 #include "exsearcher/SearchEngine.h"
 
+#include <QHash>
 #include <QObject>
 #include <QString>
 #include <QThreadPool>
@@ -13,6 +14,13 @@
 #include <cstdint>
 #include <memory>
 #include <thread>
+#include <vector>
+
+// Drive metadata exposed to the UI for chip rendering.
+struct DriveInfo {
+    QString letter;    // e.g. "C:"
+    bool isRemote;     // DRIVE_REMOTE = true, DRIVE_FIXED = false
+};
 
 // Owns the core Index/SearchEngine and orchestrates the background crawl plus
 // search execution. All core access happens off the UI thread; results are
@@ -46,9 +54,17 @@ public:
     // Read-only access for the model (UI thread, only valid after ready).
     const exsearcher::Index& index() const { return index_; }
 
-    // Queue a search. seq is echoed back with the result so the UI can drop
-    // superseded queries. No-op (emits empty) if the index isn't ready yet.
-    void requestSearch(const QString& query, quint64 seq);
+    // The list of all detected drives (populated before start() begins crawl).
+    const QVector<DriveInfo>& detectedDrives() const { return detectedDrives_; }
+
+    // Queue a search with optional root filter (nullptr = all roots).
+    // seq is echoed back with the result so the UI can drop superseded queries.
+    void requestSearch(const QString& query, quint64 seq,
+                       const std::vector<uint32_t>* allowedRoots = nullptr);
+
+    // Returns the root entry index for a given drive letter (e.g. "C:").
+    // Returns UINT32_MAX if the drive wasn't crawled this session.
+    quint32 rootIndexForDrive(const QString& letter) const;
 
 signals:
     // Throttled live progress during crawl: entries indexed so far.
@@ -61,7 +77,7 @@ signals:
                      bool capped, quint64 elapsedMs);
 
 private:
-    static QVector<QString> autoDetectRoots();
+    static QVector<DriveInfo> detectDrives();
     void crawlThreadMain(QVector<QString> roots);
 
     exsearcher::Index index_;
@@ -74,4 +90,8 @@ private:
 
     std::thread crawlThread_;
     std::atomic<bool> ready_{false};
+
+    // Populated before crawl, maps drive letter -> root entry index.
+    QVector<DriveInfo> detectedDrives_;
+    QHash<QString, quint32> driveRootIndex_;  // filled during crawlThreadMain
 };

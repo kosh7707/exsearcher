@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "DriveChipBar.h"
 #include "IndexController.h"
 #include "ResultsModel.h"
 
@@ -11,6 +12,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <dwmapi.h>
 #include <shellapi.h>
 
 #include <QApplication>
@@ -21,10 +23,12 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QSettings>
 #include <QStatusBar>
 #include <QTableView>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QWidget>
 
 namespace {
@@ -37,51 +41,128 @@ std::wstring entryPathW(const exsearcher::Index& idx, quint32 id) {
 
 MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     : QMainWindow(parent) {
+    // roots from the command line are superseded by the chip bar drive selection.
+    // The chip bar auto-detects all DRIVE_FIXED/DRIVE_REMOTE volumes and persists
+    // the enabled set in settings.ini.
+    Q_UNUSED(roots);
     setWindowTitle(QStringLiteral("exsearcher"));
-    resize(1000, 650);
+    resize(1100, 680);
 
+    // --- Settings (portable ini next to exe) ---
+    const QString iniPath =
+        QCoreApplication::applicationDirPath() + QStringLiteral("/settings.ini");
+    settings_ = new QSettings(iniPath, QSettings::IniFormat, this);
+
+    // Restore geometry.
+    const QByteArray geom = settings_->value("window/geometry").toByteArray();
+    if (!geom.isEmpty())
+        restoreGeometry(geom);
+
+    // --- Central widget ---
     auto* central = new QWidget(this);
-    auto* layout = new QVBoxLayout(central);
-    layout->setContentsMargins(6, 6, 6, 6);
-    layout->setSpacing(4);
+    auto* rootLayout = new QVBoxLayout(central);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->setSpacing(0);
 
-    search_ = new QLineEdit(central);
+    // --- Search panel (elevated bar) ---
+    auto* searchPanel = new QWidget(central);
+    searchPanel->setObjectName("searchPanel");
+    auto* panelLayout = new QVBoxLayout(searchPanel);
+    panelLayout->setContentsMargins(12, 10, 12, 8);
+    panelLayout->setSpacing(8);
+
+    // Search box with magnifying-glass label overlay.
+    auto* searchRow = new QWidget(searchPanel);
+    auto* searchRowLayout = new QHBoxLayout(searchRow);
+    searchRowLayout->setContentsMargins(0, 0, 0, 0);
+    searchRowLayout->setSpacing(0);
+
+    search_ = new QLineEdit(searchRow);
+    search_->setObjectName("searchBox");
     search_->setPlaceholderText(
-        QStringLiteral("검색어 입력… (공백 = AND)"));
+        QStringLiteral("  \U0001F50D  검색어 입력… 공백으로 AND 검색"));
     search_->setClearButtonEnabled(true);
     search_->installEventFilter(this);
-    layout->addWidget(search_);
+    searchRowLayout->addWidget(search_);
 
-    table_ = new QTableView(central);
+    panelLayout->addWidget(searchRow);
+
+    // --- Controller init (detect drives first, before chip bar) ---
+    controller_ = new IndexController(this);
     model_ = new ResultsModel(this);
+    model_->setIndex(&controller_->index());
+
+    // Start the controller to detect drives (does NOT start crawl yet).
+    // We call start() after building the chip bar so we can pass enabled drives.
+    // Actually, start() both detects and crawls — so we detect drives separately
+    // via IndexController::detectDrives which is private. We need to detect drives
+    // before start() so the chip bar can be shown immediately.
+    // Solution: call start() with the roots from chips after chip bar is built.
+
+    // --- Chip bar ---
+    // Use a temporary detectDrives approach: call start() with empty roots to
+    // trigger auto-detect, but we need the chip bar BEFORE that.
+    // We need to detect drives early. Since detectDrives is private, we rebuild
+    // the detection logic here inline for the chip bar, then start() will
+    // re-detect internally. Both detections call GetLogicalDrives which is
+    // instant and idempotent.
+    {
+        QVector<DriveInfo> earlyDrives;
+        DWORD mask = GetLogicalDrives();
+        for (int i = 0; i < 26; ++i) {
+            if (!(mask & (1u << i)))
+                continue;
+            wchar_t root[4] = {static_cast<wchar_t>(L'A' + i), L':', L'\\', L'\0'};
+            UINT type = GetDriveTypeW(root);
+            if (type == DRIVE_FIXED || type == DRIVE_REMOTE) {
+                DriveInfo di;
+                di.letter = QString::fromWCharArray(root, 2);
+                di.isRemote = (type == DRIVE_REMOTE);
+                earlyDrives.push_back(di);
+            }
+        }
+        chipBar_ = new DriveChipBar(earlyDrives, settings_, searchPanel);
+    }
+    panelLayout->addWidget(chipBar_);
+
+    rootLayout->addWidget(searchPanel);
+
+    // --- Table ---
+    table_ = new QTableView(central);
     table_->setModel(model_);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table_->setSortingEnabled(false);
+    table_->setAlternatingRowColors(true);
     table_->horizontalHeader()->setSortIndicatorShown(false);
     table_->horizontalHeader()->setStretchLastSection(false);
+    table_->horizontalHeader()->setHighlightSections(false);
     table_->verticalHeader()->setVisible(false);
-    table_->verticalHeader()->setDefaultSectionSize(20);  // compact rows
+    table_->verticalHeader()->setDefaultSectionSize(22);
+    table_->setShowGrid(false);
+    table_->setFrameShape(QFrame::NoFrame);
     table_->setContextMenuPolicy(Qt::CustomContextMenu);
     table_->setColumnWidth(ResultsModel::ColName, 280);
-    table_->setColumnWidth(ResultsModel::ColPath, 420);
+    table_->setColumnWidth(ResultsModel::ColPath, 440);
     table_->setColumnWidth(ResultsModel::ColSize, 90);
     table_->setColumnWidth(ResultsModel::ColModified, 140);
-    layout->addWidget(table_);
+    table_->setIconSize(QSize(16, 16));
+    rootLayout->addWidget(table_);
 
     setCentralWidget(central);
 
+    // --- Status bar ---
     status_ = new QLabel(QStringLiteral("색인 중…"), this);
     statusBar()->addWidget(status_);
+    statusBar()->setSizeGripEnabled(false);
 
+    // --- Debounce timer ---
     debounce_ = new QTimer(this);
     debounce_->setSingleShot(true);
     debounce_->setInterval(kDebounceMs);
 
-    controller_ = new IndexController(this);
-    model_->setIndex(&controller_->index());
-
+    // --- Connections ---
     connect(search_, &QLineEdit::textChanged, this,
             &MainWindow::onSearchTextChanged);
     connect(debounce_, &QTimer::timeout, this,
@@ -89,6 +170,10 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     connect(table_, &QTableView::activated, this, &MainWindow::onActivated);
     connect(table_, &QTableView::customContextMenuRequested, this,
             &MainWindow::onContextMenu);
+    connect(chipBar_, &DriveChipBar::filterChanged, this,
+            &MainWindow::onDriveFilterChanged);
+    connect(chipBar_, &DriveChipBar::reindexRequested, this,
+            &MainWindow::onReindexRequested);
 
     connect(controller_, &IndexController::progress, this,
             &MainWindow::onProgress, Qt::QueuedConnection);
@@ -97,16 +182,44 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     connect(controller_, &IndexController::searchReady, this,
             &MainWindow::onSearchReady, Qt::QueuedConnection);
 
+    // --- Start crawl ---
+    const QVector<QString> enabledDrives = chipBar_->enabledDrives();
+    crawledDrives_ = enabledDrives;
+    chipBar_->setChipsEnabled(false);
+
+    // Pass enabled drives explicitly so only checked drives are crawled.
+    controller_->start(enabledDrives);
+
     search_->setFocus();
-    controller_->start(roots);
+
+    // Apply dark titlebar after the window handle exists.
+    applyDarkTitlebar();
 }
 
 MainWindow::~MainWindow() = default;
 
+void MainWindow::applyDarkTitlebar() {
+    // DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Windows 11 Build 22000+).
+    // Value 19 works on older Win10 insider builds; try 20 first, fall back to 19.
+    HWND hwnd = reinterpret_cast<HWND>(winId());
+    BOOL dark = TRUE;
+    if (FAILED(DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark))))
+        DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
+}
+
 void MainWindow::closeEvent(QCloseEvent* event) {
+    settings_->setValue("window/geometry", saveGeometry());
     // Cancel + join the crawl thread before the controller (and Index) die.
     controller_->shutdown();
     event->accept();
+}
+
+bool MainWindow::nativeEvent(const QByteArray& eventType, void* message,
+                             qintptr* result) {
+    Q_UNUSED(eventType);
+    Q_UNUSED(message);
+    Q_UNUSED(result);
+    return false;
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
@@ -129,6 +242,19 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     return QMainWindow::eventFilter(watched, event);
 }
 
+std::vector<uint32_t> MainWindow::buildAllowedRoots() const {
+    if (chipBar_->allEnabled())
+        return {};  // empty = no filter
+
+    std::vector<uint32_t> roots;
+    for (const QString& letter : chipBar_->enabledDrives()) {
+        const quint32 idx = controller_->rootIndexForDrive(letter);
+        if (idx != UINT32_MAX)
+            roots.push_back(static_cast<uint32_t>(idx));
+    }
+    return roots;
+}
+
 void MainWindow::onSearchTextChanged() {
     debounce_->start();  // single-shot restart
 }
@@ -139,12 +265,24 @@ void MainWindow::onDebounceTimeout() {
 
 void MainWindow::runSearch() {
     if (!indexReady_)
-        return;  // status area already shows the indexing hint
+        return;
     const quint64 seq = ++searchSeq_;
-    controller_->requestSearch(search_->text(), seq);
+    std::vector<uint32_t> roots = buildAllowedRoots();
+    // An empty root set while chips are filtering means "exclude everything";
+    // it must not collapse into nullptr ("no filter").
+    if (!chipBar_->allEnabled() && roots.empty()) {
+        lastShownSeq_ = seq;
+        model_->setRows({});
+        status_->setText(QStringLiteral("0개 일치 — 선택된 드라이브 없음"));
+        return;
+    }
+    const std::vector<uint32_t>* rootsPtr = roots.empty() ? nullptr : &roots;
+    controller_->requestSearch(search_->text(), seq, rootsPtr);
 }
 
 void MainWindow::onProgress(quint64 entries) {
+    if (sender() != controller_)
+        return;  // queued leftover from a replaced controller
     if (indexReady_)
         return;
     status_->setText(
@@ -153,7 +291,10 @@ void MainWindow::onProgress(quint64 entries) {
 
 void MainWindow::onIndexingDone(quint64 files, quint64 dirs,
                                 quint64 elapsedMs) {
+    if (sender() != controller_)
+        return;  // queued leftover from a replaced controller
     indexReady_ = true;
+    chipBar_->setChipsEnabled(true);
     const double secs = static_cast<double>(elapsedMs) / 1000.0;
     status_->setText(QStringLiteral("파일 %1개, 폴더 %2개 색인 완료 "
                                     "(%3초) — 준비됨")
@@ -166,6 +307,10 @@ void MainWindow::onIndexingDone(quint64 files, quint64 dirs,
 
 void MainWindow::onSearchReady(quint64 seq, QVector<quint32> indices,
                                quint64 total, bool capped, quint64 elapsedMs) {
+    // Results from a replaced controller index entries of a destroyed Index;
+    // applying them to the model would render dangling rows.
+    if (sender() != controller_)
+        return;
     if (seq < lastShownSeq_)
         return;  // superseded by a newer query
     lastShownSeq_ = seq;
@@ -209,6 +354,56 @@ void MainWindow::onContextMenu(const QPoint& pos) {
         openContainingFolder(id);
     else if (chosen == copy)
         copyFullPath(id);
+}
+
+void MainWindow::onDriveFilterChanged() {
+    if (!indexReady_)
+        return;
+
+    // Check if any newly enabled drive was not crawled this session.
+    const QVector<QString> enabled = chipBar_->enabledDrives();
+    bool needsRecrawl = false;
+    for (const QString& letter : enabled) {
+        if (!crawledDrives_.contains(letter)) {
+            needsRecrawl = true;
+            break;
+        }
+    }
+
+    if (needsRecrawl) {
+        onReindexRequested();
+    } else {
+        // Just re-run the current query with updated root filter.
+        runSearch();
+    }
+}
+
+void MainWindow::onReindexRequested() {
+    // Shutdown current crawl + search state, then restart.
+    indexReady_ = false;
+    chipBar_->setChipsEnabled(false);
+    status_->setText(QStringLiteral("재색인 중…"));
+
+    controller_->shutdown();
+
+    // Reset controller state by replacing it. Disconnect first so nothing
+    // else arrives from the old instance (sender() guards catch the queued
+    // calls that were already posted).
+    disconnect(controller_, nullptr, this, nullptr);
+    controller_->deleteLater();
+    controller_ = new IndexController(this);
+    model_->setIndex(&controller_->index());
+
+    connect(controller_, &IndexController::progress, this,
+            &MainWindow::onProgress, Qt::QueuedConnection);
+    connect(controller_, &IndexController::indexingDone, this,
+            &MainWindow::onIndexingDone, Qt::QueuedConnection);
+    connect(controller_, &IndexController::searchReady, this,
+            &MainWindow::onSearchReady, Qt::QueuedConnection);
+
+    const QVector<QString> enabledDrives = chipBar_->enabledDrives();
+    crawledDrives_ = enabledDrives;
+    controller_->start(enabledDrives);
 }
 
 void MainWindow::openEntry(quint32 entryId) {
