@@ -29,7 +29,10 @@ target_link_libraries(exsearcher-cli PRIVATE exsearcher-core)
 # --- Qt6 Widgets GUI app ---
 find_package(Qt6 COMPONENTS Widgets Concurrent REQUIRED)
 
+# Version/company metadata reduces antivirus heuristic false positives on
+# unsigned executables (a bare exe with zero VERSIONINFO scores worst).
 qt_add_executable(exsearcher WIN32
+    app/exsearcher.rc
     app/main.cpp
     app/MainWindow.cpp
     app/MainWindow.h
