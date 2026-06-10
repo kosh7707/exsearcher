@@ -14,6 +14,7 @@ add_library(exsearcher-core STATIC
     core/src/Index.cpp
     core/src/CrawlIndexer.cpp
     core/src/SearchEngine.cpp
+    core/src/Snapshot.cpp
     core/src/WinText.cpp
 )
 target_include_directories(exsearcher-core PUBLIC core/include)

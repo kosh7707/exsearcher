@@ -51,6 +51,22 @@ public:
     const char* lowerData() const { return nameLowerBuf_.data(); }
     size_t lowerSize() const { return nameLowerBuf_.size(); }
 
+    // Raw primary (non-folded) UTF-8 name buffer. Exposed for snapshot save.
+    const char* nameData() const { return nameBuf_.data(); }
+    size_t nameSize() const { return nameBuf_.size(); }
+
+    // Replace the entire index contents in one shot. Used by snapshot load to
+    // restore a previously saved index. Caller guarantees no concurrent access
+    // (load happens before any threads touch the index). The two name buffers
+    // must align byte-for-byte with the offsets/lengths stored in entries.
+    void restore(std::vector<FileEntry>&& entries, std::string&& names,
+                 std::string&& lower);
+
+    // Remove every entry whose root is rootIdx and compact the index: rebuild
+    // both name buffers and remap parentIdx via an old->new index map. Caller
+    // guarantees no concurrent access (search pool drained, no crawl running).
+    void removeRoot(uint32_t rootIdx);
+
     // Reconstruct the full path of an entry by walking the parentIdx chain.
     std::string fullPath(uint32_t idx) const;
 

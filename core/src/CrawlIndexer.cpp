@@ -32,9 +32,15 @@ struct CrawlIndexer::State {
     std::atomic<uint64_t> totalDirs{0};
     std::atomic<uint64_t> skippedDirs{0};
 
-    // Progress: entries indexed so far, reported every ~100k.
+    // Progress: entries indexed so far + directories fully processed. Reported
+    // at most every ~100 ms; only one worker reports per window (CAS guard on
+    // lastReportTick below).
     std::atomic<uint64_t> entriesIndexed{0};
-    std::atomic<uint64_t> nextProgressMark{100000};
+    std::atomic<uint64_t> dirsDone{0};
+
+    // steady_clock tick (ns) of the last fired report. A worker that wants to
+    // report CASes this forward; losers skip so at most one report per window.
+    std::atomic<int64_t> lastReportTick{0};
 };
 
 namespace {
@@ -160,6 +166,9 @@ void CrawlIndexer::workerLoop() {
         if (!cancel_.load(std::memory_order_relaxed))
             processDirectory(item);
 
+        // This directory is now fully processed.
+        st.dirsDone.fetch_add(1, std::memory_order_relaxed);
+
         // Decrement pending AFTER finishing this directory. When the last
         // outstanding directory completes, signal all workers to exit.
         if (st.pending.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -236,17 +245,32 @@ void CrawlIndexer::processDirectory(const WorkItem& item) {
 
     const uint32_t firstIdx = index_.appendBatch(batch);
 
-    const uint64_t indexedNow =
-        st.entriesIndexed.fetch_add(batch.size(), std::memory_order_relaxed) +
-        batch.size();
-    // Fire progress at most every ~100k entries.
+    st.entriesIndexed.fetch_add(batch.size(), std::memory_order_relaxed);
+
+    // Fire progress at most every ~100 ms. A worker computes the current tick;
+    // if at least kReportIntervalNs has elapsed since lastReportTick, it tries
+    // to CAS the timestamp forward. Only the winning worker reports, so the
+    // callback rate is roughly bounded to ~10/s regardless of thread count.
     if (progress_) {
-        uint64_t mark = st.nextProgressMark.load(std::memory_order_relaxed);
-        while (indexedNow >= mark &&
-               st.nextProgressMark.compare_exchange_weak(
-                   mark, mark + 100000, std::memory_order_relaxed)) {
-            progress_(indexedNow);
-            mark += 100000;
+        using clock = std::chrono::steady_clock;
+        constexpr int64_t kReportIntervalNs = 100'000'000;  // 100 ms
+        const int64_t now =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                clock::now().time_since_epoch())
+                .count();
+        int64_t last = st.lastReportTick.load(std::memory_order_relaxed);
+        if (now - last >= kReportIntervalNs &&
+            st.lastReportTick.compare_exchange_strong(
+                last, now, std::memory_order_relaxed)) {
+            CrawlProgress prog;
+            prog.entries = st.entriesIndexed.load(std::memory_order_relaxed);
+            prog.dirsDone = st.dirsDone.load(std::memory_order_relaxed);
+            // pending counts directories pushed but not fully processed; this
+            // directory is still counted in pending until the worker loop
+            // decrements it, which gives a stable converging estimate.
+            prog.dirsPending = st.pending.load(std::memory_order_relaxed);
+            prog.currentDir = item.path;  // already prefix-free
+            progress_(prog);
         }
     }
 

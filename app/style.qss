@@ -82,19 +82,32 @@ QPushButton[chipButton="true"]:hover {
     background-color: #1A1D2E;
 }
 
-QPushButton[chipButton="true"]:checked {
+/* indexed + included in search (the "checked" dynamic property) */
+QPushButton[chipButton="true"][checked="true"] {
     background-color: #7C3AED;
     border-color: #7C3AED;
     color: #FFFFFF;
 }
 
-QPushButton[chipButton="true"]:checked:hover {
+QPushButton[chipButton="true"][checked="true"]:hover {
     background-color: #6D28D9;
     border-color: #6D28D9;
 }
 
-QPushButton[chipButton="true"]:checked:pressed {
+QPushButton[chipButton="true"][checked="true"]:pressed {
     background-color: #5B21B6;
+}
+
+/* not indexed yet: dashed outline, muted, hints "click to index" */
+QPushButton[chipButton="true"][indexed="false"] {
+    background-color: transparent;
+    border: 1.5px dashed #3D4358;
+    color: #64748B;
+}
+
+QPushButton[chipButton="true"][indexed="false"]:hover {
+    border-color: #7C3AED;
+    color: #C4B5FD;
 }
 
 QPushButton[chipButton="true"]:disabled {
@@ -128,6 +141,21 @@ QPushButton[reindexButton="true"]:pressed {
 QPushButton[reindexButton="true"]:disabled {
     color: #2E3340;
     border-color: #1E2230;
+}
+
+/* ---- crawl progress bar ---- */
+#crawlProgress {
+    background-color: #0D0F13;
+    border: 1px solid #2E3340;
+    border-radius: 5px;
+    max-height: 6px;
+    min-height: 6px;
+    margin-top: 2px;
+}
+
+#crawlProgress::chunk {
+    background-color: #7C3AED;
+    border-radius: 4px;
 }
 
 /* ---- table view ---- */

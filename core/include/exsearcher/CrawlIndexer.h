@@ -17,11 +17,22 @@ struct CrawlStats {
     uint64_t elapsedMs = 0;
 };
 
+// Live crawl progress. dirsDone/dirsPending give the caller a converging
+// percent estimate (dirsDone/(dirsDone+dirsPending)); the core does NOT compute
+// the percent. currentDir is the reporting worker's directory (no \\?\ prefix).
+struct CrawlProgress {
+    uint64_t entries;        // entries indexed so far
+    uint64_t dirsDone;       // directories fully processed
+    uint64_t dirsPending;    // directories discovered but not yet processed
+    std::wstring currentDir; // a directory currently being enumerated
+};
+
 // Parallel BFS crawler that fills an Index from a set of root paths.
 class CrawlIndexer {
 public:
-    // progress(entriesSoFar) is called at most every ~100k entries.
-    using ProgressCallback = std::function<void(uint64_t)>;
+    // progress(CrawlProgress) is invoked at most every ~100 ms, by a single
+    // worker per window (steady_clock + atomic CAS guard).
+    using ProgressCallback = std::function<void(const CrawlProgress&)>;
 
     explicit CrawlIndexer(Index& index);
 

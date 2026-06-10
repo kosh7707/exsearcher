@@ -18,11 +18,14 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QDateTime>
 #include <QHeaderView>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QProgressBar>
+#include <QSet>
 #include <QSettings>
 #include <QStatusBar>
 #include <QTableView>
@@ -36,6 +39,27 @@ constexpr int kDebounceMs = 30;
 
 std::wstring entryPathW(const exsearcher::Index& idx, quint32 id) {
     return QString::fromStdString(idx.fullPath(id)).toStdWString();
+}
+
+// Convert a Windows FILETIME (100ns ticks since 1601) to a yyyy-MM-dd string.
+QString filetimeToDate(quint64 ft) {
+    if (ft == 0)
+        return QStringLiteral("?");
+    // FILETIME epoch (1601) to Unix epoch (1970): 11644473600 seconds.
+    const qint64 unixMs =
+        static_cast<qint64>(ft / 10000ULL) - 11644473600000LL;
+    return QDateTime::fromMSecsSinceEpoch(unixMs).toString(
+        QStringLiteral("yyyy-MM-dd"));
+}
+
+// Elide the middle of a long path to at most maxChars characters.
+QString elideMiddle(const QString& s, int maxChars) {
+    if (s.size() <= maxChars)
+        return s;
+    const int keep = maxChars - 1;  // room for the ellipsis char
+    const int head = keep / 2;
+    const int tail = keep - head;
+    return s.left(head) + QStringLiteral("…") + s.right(tail);
 }
 } // namespace
 
@@ -87,43 +111,25 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
 
     panelLayout->addWidget(searchRow);
 
-    // --- Controller init (detect drives first, before chip bar) ---
+    // --- Controller init ---
+    // The controller detects drives in its constructor and loads the snapshot
+    // (below). No auto-crawl happens; the user picks drives via the chip bar.
     controller_ = new IndexController(this);
     model_ = new ResultsModel(this);
     model_->setIndex(&controller_->index());
 
-    // Start the controller to detect drives (does NOT start crawl yet).
-    // We call start() after building the chip bar so we can pass enabled drives.
-    // Actually, start() both detects and crawls — so we detect drives separately
-    // via IndexController::detectDrives which is private. We need to detect drives
-    // before start() so the chip bar can be shown immediately.
-    // Solution: call start() with the roots from chips after chip bar is built.
-
     // --- Chip bar ---
-    // Use a temporary detectDrives approach: call start() with empty roots to
-    // trigger auto-detect, but we need the chip bar BEFORE that.
-    // We need to detect drives early. Since detectDrives is private, we rebuild
-    // the detection logic here inline for the chip bar, then start() will
-    // re-detect internally. Both detections call GetLogicalDrives which is
-    // instant and idempotent.
-    {
-        QVector<DriveInfo> earlyDrives;
-        DWORD mask = GetLogicalDrives();
-        for (int i = 0; i < 26; ++i) {
-            if (!(mask & (1u << i)))
-                continue;
-            wchar_t root[4] = {static_cast<wchar_t>(L'A' + i), L':', L'\\', L'\0'};
-            UINT type = GetDriveTypeW(root);
-            if (type == DRIVE_FIXED || type == DRIVE_REMOTE) {
-                DriveInfo di;
-                di.letter = QString::fromWCharArray(root, 2);
-                di.isRemote = (type == DRIVE_REMOTE);
-                earlyDrives.push_back(di);
-            }
-        }
-        chipBar_ = new DriveChipBar(earlyDrives, settings_, searchPanel);
-    }
+    chipBar_ = new DriveChipBar(controller_->detectedDrives(), settings_,
+                                searchPanel);
     panelLayout->addWidget(chipBar_);
+
+    // --- Progress bar (hidden when idle) ---
+    progress_ = new QProgressBar(searchPanel);
+    progress_->setObjectName("crawlProgress");
+    progress_->setRange(0, 100);
+    progress_->setTextVisible(false);
+    progress_->setVisible(false);
+    panelLayout->addWidget(progress_);
 
     rootLayout->addWidget(searchPanel);
 
@@ -172,8 +178,14 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
             &MainWindow::onContextMenu);
     connect(chipBar_, &DriveChipBar::filterChanged, this,
             &MainWindow::onDriveFilterChanged);
-    connect(chipBar_, &DriveChipBar::reindexRequested, this,
-            &MainWindow::onReindexRequested);
+    connect(chipBar_, &DriveChipBar::crawlRequested, this,
+            &MainWindow::onCrawlRequested);
+    connect(chipBar_, &DriveChipBar::recrawlDriveRequested, this,
+            &MainWindow::onRecrawlDriveRequested);
+    connect(chipBar_, &DriveChipBar::removeDriveRequested, this,
+            &MainWindow::onRemoveDriveRequested);
+    connect(chipBar_, &DriveChipBar::reindexAllRequested, this,
+            &MainWindow::onReindexAllRequested);
 
     connect(controller_, &IndexController::progress, this,
             &MainWindow::onProgress, Qt::QueuedConnection);
@@ -182,13 +194,10 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     connect(controller_, &IndexController::searchReady, this,
             &MainWindow::onSearchReady, Qt::QueuedConnection);
 
-    // --- Start crawl ---
-    const QVector<QString> enabledDrives = chipBar_->enabledDrives();
-    crawledDrives_ = enabledDrives;
-    chipBar_->setChipsEnabled(false);
-
-    // Pass enabled drives explicitly so only checked drives are crawled.
-    controller_->start(enabledDrives);
+    // --- Load snapshot (no auto-crawl) ---
+    const bool loaded = controller_->loadSnapshot();
+    indexReady_ = loaded;
+    refreshIndexedState();
 
     search_->setFocus();
 
@@ -243,8 +252,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 }
 
 std::vector<uint32_t> MainWindow::buildAllowedRoots() const {
-    if (chipBar_->allEnabled())
-        return {};  // empty = no filter
+    if (chipBar_->allIndexedEnabled())
+        return {};  // empty = no filter (every indexed drive is enabled)
 
     std::vector<uint32_t> roots;
     for (const QString& letter : chipBar_->enabledDrives()) {
@@ -253,6 +262,49 @@ std::vector<uint32_t> MainWindow::buildAllowedRoots() const {
             roots.push_back(static_cast<uint32_t>(idx));
     }
     return roots;
+}
+
+void MainWindow::refreshIndexedState() {
+    // Tell the chip bar which drives are indexed.
+    QSet<QString> indexed;
+    for (const IndexedRoot& ir : controller_->indexedRoots())
+        indexed.insert(ir.letter);
+    chipBar_->setIndexedDrives(indexed);
+    // Normalize chip/button enabled state (re-disables reindex when nothing is
+    // indexed). Safe here because refreshIndexedState only runs when idle.
+    chipBar_->setChipsEnabled(true);
+
+    // Compose the idle status line.
+    if (indexed.isEmpty()) {
+        status_->setText(QStringLiteral(
+            "색인된 드라이브 없음 — 드라이브 칩을 눌러 색인하세요"));
+        return;
+    }
+
+    // Sorted letters + newest crawl date.
+    QStringList letters;
+    quint64 newest = 0;
+    quint64 fileCount = controller_->index().size();
+    for (const IndexedRoot& ir : controller_->indexedRoots()) {
+        letters.append(ir.letter.left(1));
+        if (ir.crawledAtFiletime > newest)
+            newest = ir.crawledAtFiletime;
+    }
+    letters.sort();
+    status_->setText(
+        QStringLiteral("저장된 색인 로드됨 — 파일 %1개, 드라이브: %2 "
+                       "(마지막 색인 %3)")
+            .arg(fileCount)
+            .arg(letters.join(QStringLiteral(", ")))
+            .arg(filetimeToDate(newest)));
+}
+
+void MainWindow::setBusyUi(const QString& statusText) {
+    indexReady_ = false;
+    chipBar_->setChipsEnabled(false);
+    progress_->setValue(0);
+    progress_->setVisible(true);
+    status_->setText(statusText);
 }
 
 void MainWindow::onSearchTextChanged() {
@@ -270,7 +322,7 @@ void MainWindow::runSearch() {
     std::vector<uint32_t> roots = buildAllowedRoots();
     // An empty root set while chips are filtering means "exclude everything";
     // it must not collapse into nullptr ("no filter").
-    if (!chipBar_->allEnabled() && roots.empty()) {
+    if (!chipBar_->allIndexedEnabled() && roots.empty()) {
         lastShownSeq_ = seq;
         model_->setRows({});
         status_->setText(QStringLiteral("0개 일치 — 선택된 드라이브 없음"));
@@ -280,47 +332,64 @@ void MainWindow::runSearch() {
     controller_->requestSearch(search_->text(), seq, rootsPtr);
 }
 
-void MainWindow::onProgress(quint64 entries) {
-    if (sender() != controller_)
-        return;  // queued leftover from a replaced controller
+void MainWindow::onProgress(quint64 entries, quint64 dirsDone,
+                            quint64 dirsPending, QString currentDir) {
     if (indexReady_)
         return;
+    const quint64 totalDirs = dirsDone + dirsPending;
+    int pct = 0;
+    if (totalDirs > 0)
+        pct = static_cast<int>((dirsDone * 100) / totalDirs);
+    if (pct > 99)
+        pct = 99;  // cap at 99 until done signal
+    progress_->setValue(pct);
+
+    const QString cur = elideMiddle(currentDir, 60);
+    const QString prefix =
+        crawlingLetter_.isEmpty() ? QString() : (crawlingLetter_ + QStringLiteral(": "));
     status_->setText(
-        QStringLiteral("색인 중… %1개 항목").arg(entries));
+        QStringLiteral("%1색인 중 — 항목 %2 · 폴더 %3/~%4 (%5%) · 현재: %6")
+            .arg(prefix)
+            .arg(entries)
+            .arg(dirsDone)
+            .arg(totalDirs)
+            .arg(pct)
+            .arg(cur));
 }
 
 void MainWindow::onIndexingDone(quint64 files, quint64 dirs,
                                 quint64 elapsedMs) {
-    if (sender() != controller_)
-        return;  // queued leftover from a replaced controller
     indexReady_ = true;
+    crawlingLetter_.clear();
+    progress_->setValue(100);
+    progress_->setVisible(false);
     chipBar_->setChipsEnabled(true);
-    const double secs = static_cast<double>(elapsedMs) / 1000.0;
-    status_->setText(QStringLiteral("파일 %1개, 폴더 %2개 색인 완료 "
-                                    "(%3초) — 준비됨")
-                         .arg(files)
-                         .arg(dirs)
-                         .arg(QString::number(secs, 'f', 1)));
+    refreshIndexedState();
+
+    if (files != 0 || dirs != 0) {
+        // A crawl completed — append a one-line summary after the idle status.
+        const double secs = static_cast<double>(elapsedMs) / 1000.0;
+        status_->setText(
+            status_->text() +
+            QStringLiteral("  ·  방금 색인: 파일 %1개, 폴더 %2개 (%3초)")
+                .arg(files)
+                .arg(dirs)
+                .arg(QString::number(secs, 'f', 1)));
+    }
     // Run any query already typed during indexing.
     runSearch();
 }
 
 void MainWindow::onSearchReady(quint64 seq, QVector<quint32> indices,
                                quint64 total, bool capped, quint64 elapsedMs) {
-    // Results from a replaced controller index entries of a destroyed Index;
-    // applying them to the model would render dangling rows.
-    if (sender() != controller_)
-        return;
     if (seq < lastShownSeq_)
         return;  // superseded by a newer query
     lastShownSeq_ = seq;
 
     model_->setRows(std::move(indices));
 
-    if (!indexReady_) {
-        status_->setText(QStringLiteral("색인 중…"));
-        return;
-    }
+    if (!indexReady_)
+        return;  // a crawl is running; leave the progress status intact
     QString msg = QStringLiteral("%1개 일치 (%2 ms)")
                       .arg(total)
                       .arg(elapsedMs);
@@ -357,53 +426,52 @@ void MainWindow::onContextMenu(const QPoint& pos) {
 }
 
 void MainWindow::onDriveFilterChanged() {
+    // An indexed drive's checked state toggled — just re-run the query under the
+    // new filter. (Crawling a not-indexed drive goes through onCrawlRequested.)
     if (!indexReady_)
         return;
-
-    // Check if any newly enabled drive was not crawled this session.
-    const QVector<QString> enabled = chipBar_->enabledDrives();
-    bool needsRecrawl = false;
-    for (const QString& letter : enabled) {
-        if (!crawledDrives_.contains(letter)) {
-            needsRecrawl = true;
-            break;
-        }
-    }
-
-    if (needsRecrawl) {
-        onReindexRequested();
-    } else {
-        // Just re-run the current query with updated root filter.
-        runSearch();
-    }
+    runSearch();
 }
 
-void MainWindow::onReindexRequested() {
-    // Shutdown current crawl + search state, then restart.
+void MainWindow::onCrawlRequested(const QString& letter) {
+    if (controller_->busy())
+        return;
+    crawlingLetter_ = letter;
+    setBusyUi(QStringLiteral("%1: 색인 중…").arg(letter));
+    controller_->crawlDrive(letter);
+}
+
+void MainWindow::onRecrawlDriveRequested(const QString& letter) {
+    if (controller_->busy())
+        return;
+    crawlingLetter_ = letter;
+    setBusyUi(QStringLiteral("%1: 재색인 중…").arg(letter));
+    controller_->recrawlDrives({letter});
+}
+
+void MainWindow::onRemoveDriveRequested(const QString& letter) {
+    if (controller_->busy())
+        return;
+    crawlingLetter_.clear();
+    // removeDrive does not crawl; show a brief busy state without a percent bar.
     indexReady_ = false;
     chipBar_->setChipsEnabled(false);
-    status_->setText(QStringLiteral("재색인 중…"));
+    status_->setText(QStringLiteral("%1: 색인에서 제거 중…").arg(letter));
+    controller_->removeDrive(letter);
+}
 
-    controller_->shutdown();
-
-    // Reset controller state by replacing it. Disconnect first so nothing
-    // else arrives from the old instance (sender() guards catch the queued
-    // calls that were already posted).
-    disconnect(controller_, nullptr, this, nullptr);
-    controller_->deleteLater();
-    controller_ = new IndexController(this);
-    model_->setIndex(&controller_->index());
-
-    connect(controller_, &IndexController::progress, this,
-            &MainWindow::onProgress, Qt::QueuedConnection);
-    connect(controller_, &IndexController::indexingDone, this,
-            &MainWindow::onIndexingDone, Qt::QueuedConnection);
-    connect(controller_, &IndexController::searchReady, this,
-            &MainWindow::onSearchReady, Qt::QueuedConnection);
-
-    const QVector<QString> enabledDrives = chipBar_->enabledDrives();
-    crawledDrives_ = enabledDrives;
-    controller_->start(enabledDrives);
+void MainWindow::onReindexAllRequested() {
+    if (controller_->busy())
+        return;
+    // Recrawl every currently-indexed drive.
+    QVector<QString> indexed;
+    for (const IndexedRoot& ir : controller_->indexedRoots())
+        indexed.push_back(ir.letter);
+    if (indexed.isEmpty())
+        return;
+    crawlingLetter_.clear();
+    setBusyUi(QStringLiteral("전체 재색인 중…"));
+    controller_->recrawlDrives(indexed);
 }
 
 void MainWindow::openEntry(quint32 entryId) {

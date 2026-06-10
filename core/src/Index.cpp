@@ -75,4 +75,74 @@ uint32_t Index::rootOf(uint32_t idx) const {
     return cur;
 }
 
+void Index::restore(std::vector<FileEntry>&& entries, std::string&& names,
+                    std::string&& lower) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    entries_ = std::move(entries);
+    nameBuf_ = std::move(names);
+    nameLowerBuf_ = std::move(lower);
+}
+
+void Index::removeRoot(uint32_t rootIdx) {
+    std::lock_guard<std::mutex> lk(mutex_);
+
+    const size_t oldCount = entries_.size();
+    if (rootIdx >= oldCount)
+        return;
+
+    // First pass: decide which entries to keep. An entry is kept when walking
+    // its parentIdx chain does NOT terminate at rootIdx. Walking per-entry would
+    // be O(n*depth); instead compute "removed" with a single forward pass since
+    // parents always precede children in append order (BFS / root-first).
+    std::vector<uint8_t> removed(oldCount, 0);
+    for (size_t i = 0; i < oldCount; ++i) {
+        const FileEntry& fe = entries_[i];
+        if (i == rootIdx) {
+            removed[i] = 1;
+        } else if (fe.parentIdx != kNoParent && removed[fe.parentIdx]) {
+            // Parent was removed => this descendant is removed too. Relies on
+            // parentIdx < i for all non-root entries (guaranteed by crawl/load
+            // ordering: a directory is appended before its children).
+            removed[i] = 1;
+        }
+    }
+
+    // Build old->new index map and rebuild buffers for the survivors.
+    std::vector<uint32_t> remap(oldCount, kNoParent);
+    std::vector<FileEntry> newEntries;
+    std::string newNames;
+    std::string newLower;
+    newEntries.reserve(oldCount);
+    newNames.reserve(nameBuf_.size());
+    newLower.reserve(nameLowerBuf_.size());
+
+    for (size_t i = 0; i < oldCount; ++i) {
+        if (removed[i])
+            continue;
+        const FileEntry& fe = entries_[i];
+        FileEntry ne = fe;
+        ne.nameOffset = static_cast<uint32_t>(newNames.size());
+        newNames.append(nameBuf_.data() + fe.nameOffset, fe.nameLen);
+        newLower.append(nameLowerBuf_.data() + fe.nameOffset, fe.nameLen);
+        // parentIdx remapped below once the full map is known. Store old parent
+        // for now; we resolve in a second pass.
+        remap[i] = static_cast<uint32_t>(newEntries.size());
+        newEntries.push_back(ne);
+    }
+
+    // Second pass: remap parentIdx of survivors using the old->new map.
+    for (size_t i = 0; i < oldCount; ++i) {
+        if (removed[i])
+            continue;
+        const uint32_t newIdx = remap[i];
+        const uint32_t oldParent = entries_[i].parentIdx;
+        newEntries[newIdx].parentIdx =
+            (oldParent == kNoParent) ? kNoParent : remap[oldParent];
+    }
+
+    entries_ = std::move(newEntries);
+    nameBuf_ = std::move(newNames);
+    nameLowerBuf_ = std::move(newLower);
+}
+
 } // namespace exsearcher

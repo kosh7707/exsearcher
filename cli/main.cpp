@@ -1,6 +1,7 @@
 #include "exsearcher/Index.h"
 #include "exsearcher/CrawlIndexer.h"
 #include "exsearcher/SearchEngine.h"
+#include "exsearcher/Snapshot.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -141,27 +142,74 @@ int wmain(int argc, wchar_t** argv) {
     g_stdoutIsConsole = GetConsoleMode(g_hOut, &outMode) != 0;
 
     if (argc < 2) {
-        printLine("Usage: exsearcher-cli <root> [<root>...]");
+        printLine("Usage: exsearcher-cli [--save <file>] <root> [<root>...]");
+        printLine("       exsearcher-cli --load <file>");
         return 1;
     }
 
+    // Parse flags: --save <file> (crawl then save), --load <file> (load instead
+    // of crawl). Remaining args are root paths.
+    std::wstring saveFile;
+    std::wstring loadFile;
     std::vector<std::wstring> roots;
-    for (int i = 1; i < argc; ++i)
-        roots.emplace_back(argv[i]);
+    for (int i = 1; i < argc; ++i) {
+        std::wstring a = argv[i];
+        if (a == L"--save" && i + 1 < argc) {
+            saveFile = argv[++i];
+        } else if (a == L"--load" && i + 1 < argc) {
+            loadFile = argv[++i];
+        } else {
+            roots.emplace_back(a);
+        }
+    }
 
     Index index;
-    CrawlIndexer crawler(index);
-    crawler.setProgressCallback([](uint64_t n) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "  ...indexed %llu entries",
-                 static_cast<unsigned long long>(n));
+
+    // Load first (if requested), then crawl any positional roots into the SAME
+    // index (append-after-load), then save (if requested). This mirrors the app
+    // flow where new drives are appended to a snapshot-loaded index.
+    if (!loadFile.empty()) {
+        std::vector<RootMeta> loadedRoots;
+        if (!loadSnapshot(index, loadedRoots, loadFile)) {
+            printLine("Load failed (corrupt or missing snapshot).");
+            return 1;
+        }
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "Loaded snapshot: %llu entries, %u roots",
+                 static_cast<unsigned long long>(index.size()),
+                 static_cast<unsigned>(loadedRoots.size()));
         printLine(buf);
-    });
+        for (const RootMeta& rm : loadedRoots) {
+            printLine("  root[" + std::to_string(rm.rootEntryIdx) + "] = " +
+                      rm.rootPathU8);
+        }
+        printLine("Index memory: " + formatBytes(index.memoryBytes()) +
+                  " (" + std::to_string(index.size()) + " entries)");
+    }
 
-    printLine("Crawling...");
-    CrawlStats stats = crawler.crawl(roots);
+    if (loadFile.empty() && roots.empty()) {
+        printLine("No roots given.");
+        return 1;
+    }
 
-    {
+    if (!roots.empty()) {
+        CrawlIndexer crawler(index);
+        crawler.setProgressCallback([](const CrawlProgress& p) {
+            std::string cur = utf16ToUtf8(p.currentDir);
+            char buf[512];
+            snprintf(buf, sizeof(buf),
+                     "  ...entries %llu  dirs %llu/~%llu  cur: %s",
+                     static_cast<unsigned long long>(p.entries),
+                     static_cast<unsigned long long>(p.dirsDone),
+                     static_cast<unsigned long long>(p.dirsDone + p.dirsPending),
+                     cur.c_str());
+            printLine(buf);
+        });
+
+        printLine("Crawling...");
+        CrawlStats stats = crawler.crawl(roots);
+
         char buf[256];
         snprintf(buf, sizeof(buf),
                  "Indexed %llu files, %llu dirs (%llu skipped) in %llu ms",
@@ -174,6 +222,29 @@ int wmain(int argc, wchar_t** argv) {
                   " (" + std::to_string(index.size()) + " entries)");
     }
 
+    if (!saveFile.empty()) {
+        // Build RootMeta from the no-parent entries (every crawl/loaded root).
+        std::vector<RootMeta> rootMetas;
+        FILETIME ft;
+        GetSystemTimeAsFileTime(&ft);
+        const uint64_t nowFt =
+            (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+        const auto& entries = index.entries();
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].parentIdx == Index::kNoParent) {
+                RootMeta rm;
+                rm.rootEntryIdx = static_cast<uint32_t>(i);
+                rm.crawledAtFiletime = nowFt;
+                rm.rootPathU8 = index.name(static_cast<uint32_t>(i));
+                rootMetas.push_back(std::move(rm));
+            }
+        }
+        if (saveSnapshot(index, rootMetas, saveFile))
+            printLine("Snapshot saved.");
+        else
+            printLine("Snapshot save FAILED.");
+    }
+
     SearchEngine engine(index);
 
     for (;;) {
@@ -183,6 +254,24 @@ int wmain(int argc, wchar_t** argv) {
             break;  // EOF / Ctrl+Z
         if (line.empty())
             break;  // empty line exits
+
+        // Meta-commands for testing core operations.
+        if (line == L"!roots") {
+            const auto& entries = index.entries();
+            for (size_t i = 0; i < entries.size(); ++i)
+                if (entries[i].parentIdx == Index::kNoParent)
+                    printLine("root[" + std::to_string(i) + "] = " +
+                              index.fullPath(static_cast<uint32_t>(i)));
+            continue;
+        }
+        if (line.rfind(L"!removeroot ", 0) == 0) {
+            const uint32_t r =
+                static_cast<uint32_t>(_wtoi(line.c_str() + 12));
+            index.removeRoot(r);
+            printLine("removed root " + std::to_string(r) + "; now " +
+                      std::to_string(index.size()) + " entries");
+            continue;
+        }
 
         using clock = std::chrono::steady_clock;
         const auto t0 = clock::now();
