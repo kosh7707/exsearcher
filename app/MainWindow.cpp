@@ -14,6 +14,7 @@
 #include <windows.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <windowsx.h>  // GET_X_LPARAM / GET_Y_LPARAM
 
 #include <QApplication>
 #include <QClipboard>
@@ -25,6 +26,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QProgressBar>
+#include <QPushButton>
 #include <QSet>
 #include <QSettings>
 #include <QStatusBar>
@@ -33,9 +35,14 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QWidget>
+#include <QWindow>
+#include <QScreen>
 
 namespace {
 constexpr int kDebounceMs = 30;
+
+// Resize border thickness in logical pixels.
+constexpr int kResizeBorder = 8;
 
 std::wstring entryPathW(const exsearcher::Index& idx, quint32 id) {
     return QString::fromStdString(idx.fullPath(id)).toStdWString();
@@ -61,16 +68,88 @@ QString elideMiddle(const QString& s, int maxChars) {
     const int tail = keep - head;
     return s.left(head) + QStringLiteral("…") + s.right(tail);
 }
+
+// Convert physical screen pixels to logical pixels using device pixel ratio.
+int physToLog(int phys, qreal dpr) {
+    return (dpr > 0.0) ? static_cast<int>(phys / dpr) : phys;
+}
+
 } // namespace
+
+// ============================================================
+// TitleBar implementation
+// ============================================================
+
+TitleBar::TitleBar(QWidget* parent) : QWidget(parent) {
+    setObjectName("titleBar");
+    setFixedHeight(40);
+
+    auto* layout = new QHBoxLayout(this);
+    layout->setContentsMargins(12, 0, 0, 0);
+    layout->setSpacing(0);
+
+    // App icon (16x16).
+    auto* iconLabel = new QLabel(this);
+    iconLabel->setPixmap(QIcon(QStringLiteral(":/icon256.png")).pixmap(16, 16));
+    iconLabel->setFixedSize(16, 16);
+    layout->addWidget(iconLabel);
+
+    layout->addSpacing(8);
+
+    // App name label.
+    auto* titleLabel = new QLabel(QStringLiteral("exsearcher"), this);
+    titleLabel->setObjectName("titleLabel");
+    layout->addWidget(titleLabel);
+
+    layout->addStretch(1);
+
+    // Caption buttons — use Segoe MDL2 Assets glyphs.
+    // U+E921 minimize, U+E922 maximize, U+E923 restore, U+E8BB close
+    btnMin_ = new QPushButton(QString(QChar(0xE921)), this);
+    btnMin_->setObjectName("btnMinimize");
+    btnMin_->setFocusPolicy(Qt::NoFocus);
+    btnMin_->setToolTip(QStringLiteral("최소화"));
+
+    btnMax_ = new QPushButton(QString(QChar(0xE922)), this);
+    btnMax_->setObjectName("btnMaximize");
+    btnMax_->setFocusPolicy(Qt::NoFocus);
+    btnMax_->setToolTip(QStringLiteral("최대화"));
+
+    btnClose_ = new QPushButton(QString(QChar(0xE8BB)), this);
+    btnClose_->setObjectName("btnClose");
+    btnClose_->setFocusPolicy(Qt::NoFocus);
+    btnClose_->setToolTip(QStringLiteral("닫기"));
+
+    layout->addWidget(btnMin_);
+    layout->addWidget(btnMax_);
+    layout->addWidget(btnClose_);
+}
+
+void TitleBar::updateMaxGlyph(bool isMaximized) {
+    // U+E923 restore, U+E922 maximize
+    btnMax_->setText(QString(QChar(isMaximized ? 0xE923 : 0xE922)));
+    btnMax_->setToolTip(isMaximized ? QStringLiteral("복원") : QStringLiteral("최대화"));
+}
+
+// ============================================================
+// MainWindow implementation
+// ============================================================
 
 MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     : QMainWindow(parent) {
-    // roots from the command line are superseded by the chip bar drive selection.
-    // The chip bar auto-detects all DRIVE_FIXED/DRIVE_REMOTE volumes and persists
-    // the enabled set in settings.ini.
     Q_UNUSED(roots);
     setWindowTitle(QStringLiteral("exsearcher"));
     resize(1100, 680);
+
+    // --- Frameless window: remove OS chrome, keep DWM shadow + Win11 corners.
+    setWindowFlags(windowFlags() | Qt::FramelessWindowHint);
+
+    // Extend DWM frame into client area by 1px at the top.
+    // This keeps the DWM shadow (and rounded Win11 corners) alive on a
+    // frameless window. MARGINS{left, right, top, bottom}.
+    HWND hwnd = reinterpret_cast<HWND>(winId());
+    MARGINS margins{0, 0, 1, 0};
+    DwmExtendFrameIntoClientArea(hwnd, &margins);
 
     // --- Settings (portable ini next to exe) ---
     const QString iniPath =
@@ -88,6 +167,17 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     rootLayout->setContentsMargins(0, 0, 0, 0);
     rootLayout->setSpacing(0);
 
+    // --- Custom title bar ---
+    titleBar_ = new TitleBar(central);
+    rootLayout->addWidget(titleBar_);
+
+    connect(titleBar_->btnMinimize(), &QPushButton::clicked,
+            this, &MainWindow::onMinimizeClicked);
+    connect(titleBar_->btnMaximize(), &QPushButton::clicked,
+            this, &MainWindow::onMaximizeClicked);
+    connect(titleBar_->btnClose(), &QPushButton::clicked,
+            this, &MainWindow::onCloseClicked);
+
     // --- Search panel (elevated bar) ---
     auto* searchPanel = new QWidget(central);
     searchPanel->setObjectName("searchPanel");
@@ -95,7 +185,7 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     panelLayout->setContentsMargins(12, 10, 12, 8);
     panelLayout->setSpacing(8);
 
-    // Search box with magnifying-glass label overlay.
+    // Search box.
     auto* searchRow = new QWidget(searchPanel);
     auto* searchRowLayout = new QHBoxLayout(searchRow);
     searchRowLayout->setContentsMargins(0, 0, 0, 0);
@@ -104,7 +194,7 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     search_ = new QLineEdit(searchRow);
     search_->setObjectName("searchBox");
     search_->setPlaceholderText(
-        QStringLiteral("  \U0001F50D  검색어 입력… 공백으로 AND 검색"));
+        QStringLiteral("검색어 입력… 공백으로 AND 검색"));
     search_->setClearButtonEnabled(true);
     search_->installEventFilter(this);
     searchRowLayout->addWidget(search_);
@@ -112,8 +202,6 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     panelLayout->addWidget(searchRow);
 
     // --- Controller init ---
-    // The controller detects drives in its constructor and loads the snapshot
-    // (below). No auto-crawl happens; the user picks drives via the chip bar.
     controller_ = new IndexController(this);
     model_ = new ResultsModel(this);
     model_->setIndex(&controller_->index());
@@ -200,35 +288,177 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     refreshIndexedState();
 
     search_->setFocus();
-
-    // Apply dark titlebar after the window handle exists.
-    applyDarkTitlebar();
 }
 
 MainWindow::~MainWindow() = default;
 
-void MainWindow::applyDarkTitlebar() {
-    // DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Windows 11 Build 22000+).
-    // Value 19 works on older Win10 insider builds; try 20 first, fall back to 19.
-    HWND hwnd = reinterpret_cast<HWND>(winId());
-    BOOL dark = TRUE;
-    if (FAILED(DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark))))
-        DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
+int MainWindow::titleBarHeight() const {
+    // titleBar_ is 40 logical px.  For the NCHITTEST calculations in physical
+    // pixels we return the logical value; the caller scales as needed.
+    return titleBar_ ? titleBar_->height() : 40;
+}
+
+void MainWindow::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::WindowStateChange && titleBar_) {
+        titleBar_->updateMaxGlyph(isMaximized());
+    }
+    QMainWindow::changeEvent(event);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     settings_->setValue("window/geometry", saveGeometry());
-    // Cancel + join the crawl thread before the controller (and Index) die.
     controller_->shutdown();
     event->accept();
 }
 
+// ---------------------------------------------------------------------------
+// nativeEvent — frameless window chrome
+// ---------------------------------------------------------------------------
 bool MainWindow::nativeEvent(const QByteArray& eventType, void* message,
                              qintptr* result) {
     Q_UNUSED(eventType);
-    Q_UNUSED(message);
-    Q_UNUSED(result);
-    return false;
+    auto* msg = static_cast<MSG*>(message);
+
+    switch (msg->message) {
+
+    // WM_NCCALCSIZE: tell DWM to use our full client rect as the window rect.
+    // When wParam is TRUE, adjust the first RECT (rcNewClient) so DWM removes
+    // the standard NC frame.  When maximised we must inset by SM_CXSIZEFRAME +
+    // SM_CXPADDEDBORDER on all sides to avoid the maximised 8px overhang
+    // painting off-screen.
+    case WM_NCCALCSIZE: {
+        if (!msg->wParam)
+            return false;  // wParam 0: just return 0 (default), handled by Qt
+
+        auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(msg->lParam);
+        RECT& r = params->rgrc[0];
+
+        if (IsZoomed(msg->hwnd)) {
+            const int frame = GetSystemMetrics(SM_CXSIZEFRAME)
+                            + GetSystemMetrics(SM_CXPADDEDBORDER);
+            r.left   += frame;
+            r.top    += frame;
+            r.right  -= frame;
+            r.bottom -= frame;
+        }
+        *result = 0;
+        return true;
+    }
+
+    // WM_NCHITTEST: identify which part of the window was hit.
+    case WM_NCHITTEST: {
+        // Screen coords of the cursor.
+        const POINT ptScreen{GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)};
+
+        RECT wndRect;
+        GetWindowRect(msg->hwnd, &wndRect);
+
+        const int x = ptScreen.x - wndRect.left;
+        const int y = ptScreen.y - wndRect.top;
+        const int w = wndRect.right  - wndRect.left;
+        const int h = wndRect.bottom - wndRect.top;
+
+        // Physical resize-border thickness.  Use device pixel ratio for
+        // per-monitor DPI awareness.
+        const qreal dpr = devicePixelRatioF();
+        const int rb = static_cast<int>(kResizeBorder * dpr);
+
+        // Only show resize cursors when NOT maximised.
+        const bool zoomed = IsZoomed(msg->hwnd);
+
+        if (!zoomed) {
+            if (x < rb && y < rb) { *result = HTTOPLEFT;     return true; }
+            if (x > w - rb && y < rb) { *result = HTTOPRIGHT; return true; }
+            if (x < rb && y > h - rb) { *result = HTBOTTOMLEFT; return true; }
+            if (x > w - rb && y > h - rb) { *result = HTBOTTOMRIGHT; return true; }
+            if (y < rb) { *result = HTTOP;    return true; }
+            if (y > h - rb) { *result = HTBOTTOM; return true; }
+            if (x < rb) { *result = HTLEFT;   return true; }
+            if (x > w - rb) { *result = HTRIGHT;  return true; }
+        }
+
+        // Titlebar region in physical pixels.
+        const int tbH = static_cast<int>(titleBarHeight() * dpr);
+
+        if (y <= tbH) {
+            // Check if cursor is over a caption button so Windows can show the
+            // snap layout flyout over HTMAXBUTTON and route close/min correctly.
+            if (titleBar_) {
+                // Map cursor to titlebar widget coordinates (logical).
+                const QPoint logPt = QPoint(physToLog(x, dpr), physToLog(y, dpr));
+                const QPoint tbLocal = titleBar_->mapFrom(this, logPt);
+
+                // Check maximize button for HTMAXBUTTON (enables snap flyout).
+                if (titleBar_->btnMaximize()->geometry().contains(tbLocal)) {
+                    *result = HTMAXBUTTON;
+                    return true;
+                }
+                // Check minimize and close buttons — they are HTCLIENT so Qt
+                // receives mouse events and handles them normally.
+                if (titleBar_->btnMinimize()->geometry().contains(tbLocal) ||
+                    titleBar_->btnClose()->geometry().contains(tbLocal)) {
+                    *result = HTCLIENT;
+                    return true;
+                }
+            }
+            *result = HTCAPTION;
+            return true;
+        }
+
+        *result = HTCLIENT;
+        return true;
+    }
+
+    // WM_NCLBUTTONDOWN / WM_NCLBUTTONUP for HTMAXBUTTON:
+    // Qt does not deliver QMouseEvent to widgets that are within an HT-claimed
+    // NC region.  We need to forward the click ourselves so the maximize button
+    // actually fires.  Track hover so the button still lights up correctly.
+    case WM_NCLBUTTONDOWN: {
+        if (msg->wParam == HTMAXBUTTON && titleBar_) {
+            // Simulate a press on the maximize button.
+            QMouseEvent press(QEvent::MouseButtonPress,
+                              QPointF(0, 0), QPointF(0, 0),
+                              Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(titleBar_->btnMaximize(), &press);
+            *result = 0;
+            return true;
+        }
+        break;
+    }
+    case WM_NCLBUTTONUP: {
+        if (msg->wParam == HTMAXBUTTON && titleBar_) {
+            QMouseEvent release(QEvent::MouseButtonRelease,
+                                QPointF(0, 0), QPointF(0, 0),
+                                Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(titleBar_->btnMaximize(), &release);
+            onMaximizeClicked();
+            *result = 0;
+            return true;
+        }
+        break;
+    }
+
+    // WM_NCMOUSEMOVE over HTMAXBUTTON: keep hover highlight alive.
+    case WM_NCMOUSEMOVE: {
+        if (msg->wParam == HTMAXBUTTON && titleBar_) {
+            QEvent enter(QEvent::Enter);
+            QApplication::sendEvent(titleBar_->btnMaximize(), &enter);
+        }
+        break;
+    }
+    case WM_NCMOUSELEAVE: {
+        if (titleBar_) {
+            QEvent leave(QEvent::Leave);
+            QApplication::sendEvent(titleBar_->btnMaximize(), &leave);
+        }
+        break;
+    }
+
+    default:
+        break;
+    }
+
+    return QMainWindow::nativeEvent(eventType, message, result);
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
@@ -251,6 +481,29 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     return QMainWindow::eventFilter(watched, event);
 }
 
+// ---------------------------------------------------------------------------
+// Caption button slots
+// ---------------------------------------------------------------------------
+
+void MainWindow::onMinimizeClicked() {
+    showMinimized();
+}
+
+void MainWindow::onMaximizeClicked() {
+    if (isMaximized())
+        showNormal();
+    else
+        showMaximized();
+}
+
+void MainWindow::onCloseClicked() {
+    close();
+}
+
+// ---------------------------------------------------------------------------
+// Business logic helpers
+// ---------------------------------------------------------------------------
+
 std::vector<uint32_t> MainWindow::buildAllowedRoots() const {
     if (chipBar_->allIndexedEnabled())
         return {};  // empty = no filter (every indexed drive is enabled)
@@ -265,23 +518,18 @@ std::vector<uint32_t> MainWindow::buildAllowedRoots() const {
 }
 
 void MainWindow::refreshIndexedState() {
-    // Tell the chip bar which drives are indexed.
     QSet<QString> indexed;
     for (const IndexedRoot& ir : controller_->indexedRoots())
         indexed.insert(ir.letter);
     chipBar_->setIndexedDrives(indexed);
-    // Normalize chip/button enabled state (re-disables reindex when nothing is
-    // indexed). Safe here because refreshIndexedState only runs when idle.
     chipBar_->setChipsEnabled(true);
 
-    // Compose the idle status line.
     if (indexed.isEmpty()) {
         status_->setText(QStringLiteral(
             "색인된 드라이브 없음 — 드라이브 칩을 눌러 색인하세요"));
         return;
     }
 
-    // Sorted letters + newest crawl date.
     QStringList letters;
     quint64 newest = 0;
     quint64 fileCount = controller_->index().size();
@@ -307,8 +555,12 @@ void MainWindow::setBusyUi(const QString& statusText) {
     status_->setText(statusText);
 }
 
+// ---------------------------------------------------------------------------
+// Slots
+// ---------------------------------------------------------------------------
+
 void MainWindow::onSearchTextChanged() {
-    debounce_->start();  // single-shot restart
+    debounce_->start();
 }
 
 void MainWindow::onDebounceTimeout() {
@@ -320,8 +572,6 @@ void MainWindow::runSearch() {
         return;
     const quint64 seq = ++searchSeq_;
     std::vector<uint32_t> roots = buildAllowedRoots();
-    // An empty root set while chips are filtering means "exclude everything";
-    // it must not collapse into nullptr ("no filter").
     if (!chipBar_->allIndexedEnabled() && roots.empty()) {
         lastShownSeq_ = seq;
         model_->setRows({});
@@ -341,7 +591,7 @@ void MainWindow::onProgress(quint64 entries, quint64 dirsDone,
     if (totalDirs > 0)
         pct = static_cast<int>((dirsDone * 100) / totalDirs);
     if (pct > 99)
-        pct = 99;  // cap at 99 until done signal
+        pct = 99;
     progress_->setValue(pct);
 
     const QString cur = elideMiddle(currentDir, 60);
@@ -357,8 +607,7 @@ void MainWindow::onProgress(quint64 entries, quint64 dirsDone,
             .arg(cur));
 }
 
-void MainWindow::onIndexingDone(quint64 files, quint64 dirs,
-                                quint64 elapsedMs) {
+void MainWindow::onIndexingDone(quint64 files, quint64 dirs, quint64 elapsedMs) {
     indexReady_ = true;
     crawlingLetter_.clear();
     progress_->setValue(100);
@@ -367,7 +616,6 @@ void MainWindow::onIndexingDone(quint64 files, quint64 dirs,
     refreshIndexedState();
 
     if (files != 0 || dirs != 0) {
-        // A crawl completed — append a one-line summary after the idle status.
         const double secs = static_cast<double>(elapsedMs) / 1000.0;
         status_->setText(
             status_->text() +
@@ -376,20 +624,19 @@ void MainWindow::onIndexingDone(quint64 files, quint64 dirs,
                 .arg(dirs)
                 .arg(QString::number(secs, 'f', 1)));
     }
-    // Run any query already typed during indexing.
     runSearch();
 }
 
 void MainWindow::onSearchReady(quint64 seq, QVector<quint32> indices,
                                quint64 total, bool capped, quint64 elapsedMs) {
     if (seq < lastShownSeq_)
-        return;  // superseded by a newer query
+        return;
     lastShownSeq_ = seq;
 
     model_->setRows(std::move(indices));
 
     if (!indexReady_)
-        return;  // a crawl is running; leave the progress status intact
+        return;
     QString msg = QStringLiteral("%1개 일치 (%2 ms)")
                       .arg(total)
                       .arg(elapsedMs);
@@ -411,10 +658,9 @@ void MainWindow::onContextMenu(const QPoint& pos) {
     const quint32 id = model_->entryIndex(idx.row());
 
     QMenu menu(this);
-    QAction* open = menu.addAction(QStringLiteral("열기"));
-    QAction* reveal =
-        menu.addAction(QStringLiteral("폴더에서 열기"));
-    QAction* copy = menu.addAction(QStringLiteral("전체 경로 복사"));
+    QAction* open   = menu.addAction(QStringLiteral("열기"));
+    QAction* reveal = menu.addAction(QStringLiteral("폴더에서 열기"));
+    QAction* copy   = menu.addAction(QStringLiteral("전체 경로 복사"));
 
     QAction* chosen = menu.exec(table_->viewport()->mapToGlobal(pos));
     if (chosen == open)
@@ -426,8 +672,6 @@ void MainWindow::onContextMenu(const QPoint& pos) {
 }
 
 void MainWindow::onDriveFilterChanged() {
-    // An indexed drive's checked state toggled — just re-run the query under the
-    // new filter. (Crawling a not-indexed drive goes through onCrawlRequested.)
     if (!indexReady_)
         return;
     runSearch();
@@ -453,7 +697,6 @@ void MainWindow::onRemoveDriveRequested(const QString& letter) {
     if (controller_->busy())
         return;
     crawlingLetter_.clear();
-    // removeDrive does not crawl; show a brief busy state without a percent bar.
     indexReady_ = false;
     chipBar_->setChipsEnabled(false);
     status_->setText(QStringLiteral("%1: 색인에서 제거 중…").arg(letter));
@@ -463,7 +706,6 @@ void MainWindow::onRemoveDriveRequested(const QString& letter) {
 void MainWindow::onReindexAllRequested() {
     if (controller_->busy())
         return;
-    // Recrawl every currently-indexed drive.
     QVector<QString> indexed;
     for (const IndexedRoot& ir : controller_->indexedRoots())
         indexed.push_back(ir.letter);
@@ -473,6 +715,10 @@ void MainWindow::onReindexAllRequested() {
     setBusyUi(QStringLiteral("전체 재색인 중…"));
     controller_->recrawlDrives(indexed);
 }
+
+// ---------------------------------------------------------------------------
+// File operations
+// ---------------------------------------------------------------------------
 
 void MainWindow::openEntry(quint32 entryId) {
     if (entryId == UINT32_MAX)

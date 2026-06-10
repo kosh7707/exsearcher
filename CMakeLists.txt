@@ -46,7 +46,7 @@ qt_add_executable(exsearcher WIN32
     app/DriveChipBar.h
 )
 set_target_properties(exsearcher PROPERTIES AUTOMOC ON)
-# dwmapi: dark titlebar via DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)
+# dwmapi: DwmExtendFrameIntoClientArea for custom frameless titlebar shadow
 target_link_libraries(exsearcher PRIVATE exsearcher-core Qt6::Widgets Qt6::Concurrent dwmapi)
 
 # --- deploy: stage exe + Qt runtime into build/dist/exsearcher/ ---

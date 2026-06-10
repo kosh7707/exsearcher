@@ -1,62 +1,115 @@
 /* ============================================================
-   exsearcher — dark utility theme
-   Base: Fusion style + custom palette (set in main.cpp)
-   Accent: indigo #7C3AED / hover #6D28D9 / pressed #5B21B6
-   Amber accent: #F59E0B (status/icon dot)
+   exsearcher — light Fluent theme
+   Base: Fusion style + light QPalette (set in main.cpp)
+   Accent: Fluent blue #0F6CBD / hover #0C5AA0
+   Background: warm off-white #FAFAF8 / panels #F4F4F2
+   Text: #1A1A1A primary / #6B6B68 secondary
+   Border: hairline #E3E3E0
    ============================================================ */
 
 /* ---- global ---- */
 QWidget {
-    font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;
+    font-family: "Segoe UI Variable Text", "Segoe UI", "Malgun Gothic", sans-serif;
     font-size: 13px;
-    color: #E2E8F0;
-    background-color: #111318;
+    color: #1A1A1A;
+    background-color: #FAFAF8;
 }
 
 QMainWindow {
-    background-color: #111318;
+    background-color: #FAFAF8;
+}
+
+/* ---- custom title bar ---- */
+#titleBar {
+    background-color: #F4F4F2;
+    border-bottom: 1px solid #E3E3E0;
+    min-height: 40px;
+    max-height: 40px;
+}
+
+#titleLabel {
+    color: #6B6B68;
+    font-size: 13px;
+    background: transparent;
+}
+
+/* Caption buttons: minimize / maximize / close */
+#btnMinimize,
+#btnMaximize,
+#btnClose {
+    background-color: transparent;
+    border: none;
+    color: #1A1A1A;
+    font-family: "Segoe MDL2 Assets";
+    font-size: 10px;
+    min-width: 46px;
+    max-width: 46px;
+    min-height: 40px;
+    max-height: 40px;
+    padding: 0px;
+    border-radius: 0px;
+}
+
+#btnMinimize:hover,
+#btnMaximize:hover {
+    background-color: #E9E9E6;
+}
+
+#btnMinimize:pressed,
+#btnMaximize:pressed {
+    background-color: #D9D9D6;
+}
+
+#btnClose:hover {
+    background-color: #C42B1C;
+    color: #FFFFFF;
+}
+
+#btnClose:pressed {
+    background-color: #A02317;
+    color: #FFFFFF;
 }
 
 /* ---- search panel ---- */
 #searchPanel {
-    background-color: #1C1F26;
-    border-bottom: 1px solid #2A2D36;
+    background-color: #F4F4F2;
+    border-bottom: 1px solid #E3E3E0;
     padding: 10px 12px 8px 12px;
 }
 
 /* ---- search box ---- */
 #searchBox {
-    background-color: #0D0F13;
-    color: #F1F5F9;
-    border: 1.5px solid #2E3340;
-    border-radius: 8px;
-    padding: 6px 36px 6px 38px;
-    font-size: 14px;
-    selection-background-color: #7C3AED;
+    background-color: #FFFFFF;
+    color: #1A1A1A;
+    border: 1px solid #E3E3E0;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 15px;
+    selection-background-color: #0F6CBD;
     selection-color: #FFFFFF;
-    min-height: 26px;
+    min-height: 28px;
 }
 
 #searchBox:focus {
-    border-color: #7C3AED;
-    background-color: #0A0C10;
+    border-color: #0F6CBD;
+    border-width: 1.5px;
 }
 
 #searchBox:hover:!focus {
-    border-color: #3D4358;
+    border-color: #BABAB8;
 }
 
 /* clear button inside QLineEdit */
 #searchBox QToolButton {
     background: transparent;
     border: none;
-    color: #64748B;
+    color: #9B9B98;
     padding: 0px;
     margin-right: 4px;
 }
 
 #searchBox QToolButton:hover {
-    color: #94A3B8;
+    color: #6B6B68;
 }
 
 /* ---- drive chips ---- */
@@ -65,10 +118,10 @@ QMainWindow {
 }
 
 QPushButton[chipButton="true"] {
-    background-color: #1E2230;
-    color: #94A3B8;
-    border: 1.5px solid #2E3340;
-    border-radius: 12px;
+    background-color: #FFFFFF;
+    color: #1A1A1A;
+    border: 1px solid #E3E3E0;
+    border-radius: 4px;
     padding: 3px 12px;
     font-size: 12px;
     font-weight: 500;
@@ -77,51 +130,52 @@ QPushButton[chipButton="true"] {
 }
 
 QPushButton[chipButton="true"]:hover {
-    border-color: #7C3AED;
-    color: #C4B5FD;
-    background-color: #1A1D2E;
+    border-color: #0F6CBD;
+    color: #0F6CBD;
+    background-color: #F0F6FC;
 }
 
 /* indexed + included in search (the "checked" dynamic property) */
 QPushButton[chipButton="true"][checked="true"] {
-    background-color: #7C3AED;
-    border-color: #7C3AED;
+    background-color: #0F6CBD;
+    border-color: #0F6CBD;
     color: #FFFFFF;
 }
 
 QPushButton[chipButton="true"][checked="true"]:hover {
-    background-color: #6D28D9;
-    border-color: #6D28D9;
+    background-color: #0C5AA0;
+    border-color: #0C5AA0;
 }
 
 QPushButton[chipButton="true"][checked="true"]:pressed {
-    background-color: #5B21B6;
+    background-color: #094D8A;
 }
 
 /* not indexed yet: dashed outline, muted, hints "click to index" */
 QPushButton[chipButton="true"][indexed="false"] {
     background-color: transparent;
-    border: 1.5px dashed #3D4358;
-    color: #64748B;
+    border: 1.5px dashed #BABAB8;
+    color: #9B9B98;
 }
 
 QPushButton[chipButton="true"][indexed="false"]:hover {
-    border-color: #7C3AED;
-    color: #C4B5FD;
+    border-color: #0F6CBD;
+    color: #0F6CBD;
+    background-color: #F0F6FC;
 }
 
 QPushButton[chipButton="true"]:disabled {
-    background-color: #161820;
-    border-color: #252733;
-    color: #3D4358;
+    background-color: #F4F4F2;
+    border-color: #E3E3E0;
+    color: #C0C0BC;
 }
 
 /* ---- reindex button ---- */
 QPushButton[reindexButton="true"] {
     background-color: transparent;
-    color: #64748B;
-    border: 1.5px solid #2E3340;
-    border-radius: 6px;
+    color: #6B6B68;
+    border: 1px solid #E3E3E0;
+    border-radius: 4px;
     padding: 3px 10px;
     font-size: 12px;
     min-height: 24px;
@@ -129,44 +183,44 @@ QPushButton[reindexButton="true"] {
 }
 
 QPushButton[reindexButton="true"]:hover {
-    border-color: #F59E0B;
-    color: #F59E0B;
-    background-color: rgba(245, 158, 11, 0.08);
+    border-color: #0F6CBD;
+    color: #0F6CBD;
+    background-color: #F0F6FC;
 }
 
 QPushButton[reindexButton="true"]:pressed {
-    background-color: rgba(245, 158, 11, 0.15);
+    background-color: #E0EEF9;
 }
 
 QPushButton[reindexButton="true"]:disabled {
-    color: #2E3340;
-    border-color: #1E2230;
+    color: #C0C0BC;
+    border-color: #E3E3E0;
 }
 
 /* ---- crawl progress bar ---- */
 #crawlProgress {
-    background-color: #0D0F13;
-    border: 1px solid #2E3340;
-    border-radius: 5px;
-    max-height: 6px;
-    min-height: 6px;
-    margin-top: 2px;
+    background-color: #EBEBEA;
+    border: none;
+    border-radius: 0px;
+    max-height: 3px;
+    min-height: 3px;
+    margin-top: 4px;
 }
 
 #crawlProgress::chunk {
-    background-color: #7C3AED;
-    border-radius: 4px;
+    background-color: #0F6CBD;
+    border-radius: 0px;
 }
 
 /* ---- table view ---- */
 QTableView {
-    background-color: #111318;
-    alternate-background-color: #141720;
+    background-color: #FFFFFF;
+    alternate-background-color: #FAFAF8;
     gridline-color: transparent;
     border: none;
-    border-top: 1px solid #1C1F26;
-    selection-background-color: #3B1F7A;
-    selection-color: #E2E8F0;
+    border-top: 1px solid #E3E3E0;
+    selection-background-color: #CCE4F6;
+    selection-color: #1A1A1A;
     show-decoration-selected: 1;
     outline: 0;
 }
@@ -177,34 +231,34 @@ QTableView::item {
 }
 
 QTableView::item:hover {
-    background-color: #1E2230;
+    background-color: #F0F6FC;
 }
 
 QTableView::item:selected {
-    background-color: #3B1F7A;
-    color: #E2E8F0;
+    background-color: #CCE4F6;
+    color: #1A1A1A;
 }
 
 QTableView::item:selected:hover {
-    background-color: #4C2A9E;
+    background-color: #B8D8F0;
 }
 
 /* column header */
 QHeaderView {
-    background-color: #111318;
+    background-color: #FFFFFF;
 }
 
 QHeaderView::section {
-    background-color: #161820;
-    color: #64748B;
+    background-color: #F4F4F2;
+    color: #6B6B68;
     border: none;
-    border-bottom: 1px solid #1E2230;
-    border-right: 1px solid #1E2230;
+    border-bottom: 1px solid #E3E3E0;
+    border-right: 1px solid #E3E3E0;
     padding: 4px 8px;
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.3px;
 }
 
 QHeaderView::section:last {
@@ -212,25 +266,25 @@ QHeaderView::section:last {
 }
 
 QHeaderView::section:hover {
-    background-color: #1A1D2A;
-    color: #94A3B8;
+    background-color: #EBEBEA;
+    color: #1A1A1A;
 }
 
 /* ---- scrollbars ---- */
 QScrollBar:vertical {
-    background: #111318;
+    background: #FAFAF8;
     width: 8px;
     margin: 0px;
 }
 
 QScrollBar::handle:vertical {
-    background: #2A2D3A;
+    background: #C8C8C6;
     min-height: 24px;
     border-radius: 4px;
 }
 
 QScrollBar::handle:vertical:hover {
-    background: #3D4358;
+    background: #A8A8A6;
 }
 
 QScrollBar::add-line:vertical,
@@ -239,18 +293,18 @@ QScrollBar::sub-line:vertical {
 }
 
 QScrollBar:horizontal {
-    background: #111318;
+    background: #FAFAF8;
     height: 8px;
 }
 
 QScrollBar::handle:horizontal {
-    background: #2A2D3A;
+    background: #C8C8C6;
     min-width: 24px;
     border-radius: 4px;
 }
 
 QScrollBar::handle:horizontal:hover {
-    background: #3D4358;
+    background: #A8A8A6;
 }
 
 QScrollBar::add-line:horizontal,
@@ -260,9 +314,9 @@ QScrollBar::sub-line:horizontal {
 
 /* ---- status bar ---- */
 QStatusBar {
-    background-color: #0D0F13;
-    color: #4A5568;
-    border-top: 1px solid #1C1F26;
+    background-color: #F4F4F2;
+    color: #6B6B68;
+    border-top: 1px solid #E3E3E0;
     font-size: 11px;
     padding: 0px 8px;
     min-height: 22px;
@@ -271,18 +325,18 @@ QStatusBar {
 
 QStatusBar QLabel {
     background: transparent;
-    color: #4A5568;
+    color: #6B6B68;
     font-size: 11px;
     padding: 0px;
 }
 
 /* ---- context menu ---- */
 QMenu {
-    background-color: #1C1F26;
-    border: 1px solid #2A2D36;
-    border-radius: 6px;
+    background-color: #FFFFFF;
+    border: 1px solid #E3E3E0;
+    border-radius: 4px;
     padding: 4px 0px;
-    color: #E2E8F0;
+    color: #1A1A1A;
 }
 
 QMenu::item {
@@ -291,21 +345,21 @@ QMenu::item {
 }
 
 QMenu::item:selected {
-    background-color: #7C3AED;
-    color: #FFFFFF;
+    background-color: #CCE4F6;
+    color: #1A1A1A;
 }
 
 QMenu::separator {
     height: 1px;
-    background-color: #2A2D36;
+    background-color: #E3E3E0;
     margin: 4px 8px;
 }
 
 /* ---- tooltip ---- */
 QToolTip {
-    background-color: #1C1F26;
-    color: #E2E8F0;
-    border: 1px solid #2A2D36;
+    background-color: #FFFFFF;
+    color: #1A1A1A;
+    border: 1px solid #E3E3E0;
     border-radius: 4px;
     padding: 4px 8px;
     font-size: 12px;

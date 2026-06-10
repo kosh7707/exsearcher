@@ -54,8 +54,8 @@ QString parentDir(const QString& fullPath) {
     return fullPath.left(pos);
 }
 
-// Muted gray for secondary columns (path, size, date).
-const QColor kSecondaryColor{0x4A, 0x55, 0x68};
+// Muted gray for secondary columns (path, size, date) — light theme #6B6B68.
+const QColor kSecondaryColor{0x6B, 0x6B, 0x68};
 
 } // namespace
 

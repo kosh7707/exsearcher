@@ -18,36 +18,36 @@
 
 namespace {
 
-// Build the dark QPalette that matches the QSS color scheme.
-// Fusion style reads QPalette for widget backgrounds / text colors for elements
-// QSS doesn't reach (e.g. spinboxes, some edges). Keep it consistent.
-QPalette buildDarkPalette() {
+// Build the light QPalette matching the Fluent-inspired QSS color tokens.
+// Fusion style reads QPalette for widget backgrounds/text where QSS doesn't
+// reach (spin boxes, some edges). Keep it consistent with style.qss.
+QPalette buildLightPalette() {
     QPalette p;
 
-    const QColor bg{0x11, 0x13, 0x18};          // #111318
-    const QColor panel{0x1C, 0x1F, 0x26};        // #1C1F26
-    const QColor elevated{0x1E, 0x22, 0x30};     // #1E2230
-    const QColor text{0xE2, 0xE8, 0xF0};         // #E2E8F0
-    const QColor muted{0x4A, 0x55, 0x68};        // #4A5568
-    const QColor accent{0x7C, 0x3A, 0xED};       // #7C3AED
-    const QColor accentLight{0xC4, 0xB5, 0xFD};  // #C4B5FD
-    const QColor border{0x2E, 0x33, 0x40};       // #2E3340
-    const QColor disabled{0x3D, 0x43, 0x58};     // #3D4358
-    const QColor selection{0x3B, 0x1F, 0x7A};    // #3B1F7A
+    const QColor window{0xFA, 0xFA, 0xF8};      // #FAFAF8 warm off-white
+    const QColor panel{0xF4, 0xF4, 0xF2};        // #F4F4F2 panel/titlebar
+    const QColor surface{0xFF, 0xFF, 0xFF};       // #FFFFFF input/elevated
+    const QColor text{0x1A, 0x1A, 0x1A};          // #1A1A1A primary
+    const QColor muted{0x6B, 0x6B, 0x68};         // #6B6B68 secondary
+    const QColor accent{0x0F, 0x6C, 0xBD};        // #0F6CBD Fluent blue
+    const QColor accentSel{0xCC, 0xE4, 0xF6};     // #CCE4F6 selection bg
+    const QColor border{0xE3, 0xE3, 0xE0};        // #E3E3E0 hairline
+    const QColor disabled{0xC0, 0xC0, 0xBC};      // #C0C0BC disabled text
+    const QColor disabledBg{0xEB, 0xEB, 0xEA};    // #EBEBEA disabled bg
 
-    p.setColor(QPalette::Window, bg);
+    p.setColor(QPalette::Window, window);
     p.setColor(QPalette::WindowText, text);
-    p.setColor(QPalette::Base, bg);
-    p.setColor(QPalette::AlternateBase, panel);
+    p.setColor(QPalette::Base, surface);
+    p.setColor(QPalette::AlternateBase, window);
     p.setColor(QPalette::Text, text);
     p.setColor(QPalette::Button, panel);
     p.setColor(QPalette::ButtonText, text);
     p.setColor(QPalette::BrightText, QColor(Qt::white));
-    p.setColor(QPalette::Highlight, selection);
+    p.setColor(QPalette::Highlight, accentSel);
     p.setColor(QPalette::HighlightedText, text);
-    p.setColor(QPalette::Link, accentLight);
+    p.setColor(QPalette::Link, accent);
     p.setColor(QPalette::LinkVisited, accent);
-    p.setColor(QPalette::ToolTipBase, panel);
+    p.setColor(QPalette::ToolTipBase, surface);
     p.setColor(QPalette::ToolTipText, text);
     p.setColor(QPalette::PlaceholderText, muted);
 
@@ -55,12 +55,14 @@ QPalette buildDarkPalette() {
     p.setColor(QPalette::Disabled, QPalette::Text, disabled);
     p.setColor(QPalette::Disabled, QPalette::ButtonText, disabled);
     p.setColor(QPalette::Disabled, QPalette::WindowText, disabled);
+    p.setColor(QPalette::Disabled, QPalette::Base, disabledBg);
+    p.setColor(QPalette::Disabled, QPalette::Button, disabledBg);
 
-    // Mid / Midlight / Dark — used by Fusion for 3D edge rendering.
+    // Mid / Midlight / Dark / Shadow — used by Fusion for 3-D edge rendering.
     p.setColor(QPalette::Mid, border);
-    p.setColor(QPalette::Midlight, elevated);
-    p.setColor(QPalette::Dark, QColor(0x0A, 0x0C, 0x10));
-    p.setColor(QPalette::Shadow, QColor(0x06, 0x07, 0x09));
+    p.setColor(QPalette::Midlight, surface);
+    p.setColor(QPalette::Dark, QColor(0xC0, 0xC0, 0xBC));
+    p.setColor(QPalette::Shadow, QColor(0xA0, 0xA0, 0x9C));
 
     return p;
 }
@@ -76,8 +78,8 @@ int main(int argc, char** argv) {
     app.setApplicationName(QStringLiteral("exsearcher"));
     app.setOrganizationName(QStringLiteral("kosh"));
 
-    // Apply dark palette globally.
-    app.setPalette(buildDarkPalette());
+    // Apply light palette globally.
+    app.setPalette(buildLightPalette());
 
     // Load QSS from the embedded resource.
     {

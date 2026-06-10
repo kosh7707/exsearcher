@@ -32,8 +32,8 @@ DriveChipBar::DriveChipBar(const QVector<DriveInfo>& drives,
     for (const DriveInfo& di : drives_) {
         auto* btn = new QPushButton(this);
         const QString label = di.letter + (di.isRemote
-            ? QStringLiteral(" \U0001F310")
-            : QStringLiteral(" \U0001F4BB"));
+            ? QStringLiteral(" 네트워크")
+            : QStringLiteral(" 로컬"));
         btn->setText(label);
         btn->setCheckable(false);  // we manage checked state via properties
         btn->setProperty("chipButton", true);

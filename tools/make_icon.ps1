@@ -1,5 +1,5 @@
 # Generates app/icon.ico (multi-size) and app/icon256.png for exsearcher.
-# Design: rounded-square indigo->violet gradient, bold white magnifier,
+# Design: flat #0F6CBD background (Fluent blue), bold white magnifier,
 # amber "index spark" dot inside the lens.
 Add-Type -AssemblyName System.Drawing
 
@@ -14,9 +14,9 @@ function Draw-Icon([int]$size) {
 
     $s = $size / 256.0
 
-    # Rounded-square background, diagonal gradient
+    # Rounded-square background — flat Fluent blue #0F6CBD
     $pad = [float](8 * $s)
-    $r = [float](56 * $s)
+    $r = [float](44 * $s)
     $rect = New-Object System.Drawing.RectangleF($pad, $pad, (256 * $s - 2 * $pad), (256 * $s - 2 * $pad))
     $path = New-Object System.Drawing.Drawing2D.GraphicsPath
     $d = [float](2 * $r)
@@ -25,16 +25,25 @@ function Draw-Icon([int]$size) {
     $path.AddArc($rect.Right - $d, $rect.Bottom - $d, $d, $d, 0, 90)
     $path.AddArc($rect.X, $rect.Bottom - $d, $d, $d, 90, 90)
     $path.CloseFigure()
-    $c1 = [System.Drawing.Color]::FromArgb(255, 49, 46, 129)    # indigo-900
-    $c2 = [System.Drawing.Color]::FromArgb(255, 124, 58, 237)   # violet-600
-    $grad = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, $c1, $c2, 45.0)
-    $g.FillPath($grad, $path)
+
+    # Flat Fluent blue fill
+    $bgColor = [System.Drawing.Color]::FromArgb(255, 15, 108, 189)   # #0F6CBD
+    $bgBrush = New-Object System.Drawing.SolidBrush($bgColor)
+    $g.FillPath($bgBrush, $path)
+    $bgBrush.Dispose()
+
+    # Subtle 1px darker border for definition at small sizes
+    $borderColor = [System.Drawing.Color]::FromArgb(180, 10, 79, 138)  # #0A4F8A
+    $borderPen = New-Object System.Drawing.Pen($borderColor, [float][Math]::Max(1.0, 1.5 * $s))
+    $g.DrawPath($borderPen, $path)
+    $borderPen.Dispose()
+    $path.Dispose()
 
     # Magnifier lens (white ring), slightly up-left of center
-    $cx = [float](118 * $s); $cy = [float](118 * $s)
-    $lensR = [float](58 * $s)
+    $cx = [float](116 * $s); $cy = [float](116 * $s)
+    $lensR = [float](60 * $s)
     $penW = [float][Math]::Max(1.0, 22 * $s)
-    $white = [System.Drawing.Color]::FromArgb(255, 248, 250, 252)
+    $white = [System.Drawing.Color]::FromArgb(255, 255, 255, 255)
     $pen = New-Object System.Drawing.Pen($white, $penW)
     $g.DrawEllipse($pen, $cx - $lensR, $cy - $lensR, 2 * $lensR, 2 * $lensR)
 
@@ -45,10 +54,10 @@ function Draw-Icon([int]$size) {
     $ang = [Math]::PI / 4.0
     $hx1 = [float]($cx + ($lensR + $penW * 0.35) * [Math]::Cos($ang))
     $hy1 = [float]($cy + ($lensR + $penW * 0.35) * [Math]::Sin($ang))
-    $hx2 = [float](205 * $s); $hy2 = [float](205 * $s)
+    $hx2 = [float](207 * $s); $hy2 = [float](207 * $s)
     $g.DrawLine($hpen, $hx1, $hy1, $hx2, $hy2)
 
-    # Amber spark dot inside lens (the "index hit")
+    # Amber spark dot inside lens (the "index hit") — keep amber on blue
     $amber = [System.Drawing.Color]::FromArgb(255, 251, 191, 36)
     $dotR = [float](16 * $s)
     if ($size -ge 24) {
@@ -58,7 +67,7 @@ function Draw-Icon([int]$size) {
     }
 
     $g.Dispose()
-    $pen.Dispose(); $hpen.Dispose(); $grad.Dispose(); $path.Dispose()
+    $pen.Dispose(); $hpen.Dispose()
     return $bmp
 }
 

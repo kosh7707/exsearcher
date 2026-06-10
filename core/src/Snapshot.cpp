@@ -182,8 +182,9 @@ bool loadSnapshot(Index& index, std::vector<RootMeta>& roots,
         return false;
 
     // Reject implausible sizes up front to avoid huge allocations on garbage.
-    // (max ~ 4 GiB per buffer / 100M entries is generous for this tool.)
-    if (entryCount > (1ull << 32) || nameBufSize > (1ull << 33) ||
+    // entryCount must stay below the u32 kNoParent sentinel; buffers capped
+    // at ~8 GiB, generous for this tool.
+    if (entryCount >= 0xFFFFFFFFull || nameBufSize > (1ull << 33) ||
         lowerBufSize > (1ull << 33))
         return false;
     if (nameBufSize != lowerBufSize)
@@ -209,6 +210,17 @@ bool loadSnapshot(Index& index, std::vector<RootMeta>& roots,
     std::string lower(in.data() + off, static_cast<size_t>(lowerBufSize));
     off += static_cast<size_t>(lowerBufSize);
 
+    // Structural validation. Index::name()/fullPath() index the name buffer
+    // unchecked, and removeRoot's single-pass compaction relies on parents
+    // preceding children — a corrupt file must not get to violate either.
+    for (size_t i = 0; i < entries.size(); ++i) {
+        const FileEntry& fe = entries[i];
+        if (static_cast<uint64_t>(fe.nameOffset) + fe.nameLen > nameBufSize)
+            return false;
+        if (fe.parentIdx != Index::kNoParent && fe.parentIdx >= i)
+            return false;
+    }
+
     uint32_t rootCount = 0;
     if (!get(in, off, rootCount))
         return false;
@@ -227,6 +239,10 @@ bool loadSnapshot(Index& index, std::vector<RootMeta>& roots,
             return false;
         rm.rootPathU8.assign(in.data() + off, pathLen);
         off += pathLen;
+        // Root records must point at actual root entries.
+        if (rm.rootEntryIdx >= entryCount ||
+            entries[rm.rootEntryIdx].parentIdx != Index::kNoParent)
+            return false;
         loadedRoots.push_back(std::move(rm));
     }
 

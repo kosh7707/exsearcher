@@ -5,6 +5,7 @@ out/
 # Runtime-generated state (portable app keeps these next to the exe)
 data/
 settings.ini
+*.exsdb
 
 # OMC session state
 .omc/

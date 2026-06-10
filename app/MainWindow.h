@@ -12,10 +12,38 @@ class QTimer;
 class QLabel;
 class QProgressBar;
 class QSettings;
+class QPushButton;
+class QHBoxLayout;
 class IndexController;
 class ResultsModel;
 class DriveChipBar;
 
+// ---------------------------------------------------------------------------
+// TitleBar — custom caption bar with Segoe MDL2 Assets caption glyphs.
+// Lives as the top widget of the central layout; nativeEvent in MainWindow
+// handles WM_NCHITTEST / WM_NCCALCSIZE / WM_NCLBUTTONDOWN|UP.
+// ---------------------------------------------------------------------------
+class TitleBar : public QWidget {
+    Q_OBJECT
+public:
+    explicit TitleBar(QWidget* parent = nullptr);
+
+    // Update maximize glyph after window state changes.
+    void updateMaxGlyph(bool isMaximized);
+
+    QPushButton* btnMinimize() const { return btnMin_; }
+    QPushButton* btnMaximize() const { return btnMax_; }
+    QPushButton* btnClose()    const { return btnClose_; }
+
+private:
+    QPushButton* btnMin_   = nullptr;
+    QPushButton* btnMax_   = nullptr;
+    QPushButton* btnClose_ = nullptr;
+};
+
+// ---------------------------------------------------------------------------
+// MainWindow
+// ---------------------------------------------------------------------------
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -25,6 +53,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void changeEvent(QEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
     bool nativeEvent(const QByteArray& eventType, void* message,
                      qintptr* result) override;
@@ -45,35 +74,43 @@ private slots:
     void onRemoveDriveRequested(const QString& letter);
     void onReindexAllRequested();
 
+    // Caption button slots.
+    void onMinimizeClicked();
+    void onMaximizeClicked();
+    void onCloseClicked();
+
 private:
     void openEntry(quint32 entryId);
     void openContainingFolder(quint32 entryId);
     void copyFullPath(quint32 entryId);
     void runSearch();
-    void applyDarkTitlebar();
 
     // Refresh chip indexed-state + the idle status line from the controller.
     void refreshIndexedState();
     void setBusyUi(const QString& statusText);
 
     // Build the allowedRoots vector from currently enabled chips.
-    // Returns nullptr (no filter) when all indexed drives are enabled.
+    // Returns empty (no filter) when all indexed drives are enabled.
     std::vector<uint32_t> buildAllowedRoots() const;
 
-    QLineEdit* search_ = nullptr;
-    QTableView* table_ = nullptr;
-    QTimer* debounce_ = nullptr;
-    QLabel* status_ = nullptr;
+    // Return the titlebar height in logical pixels (used in NCHITTEST).
+    int titleBarHeight() const;
+
+    TitleBar*    titleBar_  = nullptr;
+    QLineEdit*   search_    = nullptr;
+    QTableView*  table_     = nullptr;
+    QTimer*      debounce_  = nullptr;
+    QLabel*      status_    = nullptr;
     QProgressBar* progress_ = nullptr;
-    DriveChipBar* chipBar_ = nullptr;
+    DriveChipBar* chipBar_  = nullptr;
 
     IndexController* controller_ = nullptr;
-    ResultsModel* model_ = nullptr;
-    QSettings* settings_ = nullptr;
+    ResultsModel*    model_      = nullptr;
+    QSettings*       settings_   = nullptr;
 
-    bool indexReady_ = false;
-    quint64 searchSeq_ = 0;     // increments per dispatched query
-    quint64 lastShownSeq_ = 0;  // newest seq whose result is displayed
+    bool     indexReady_    = false;
+    quint64  searchSeq_     = 0;    // increments per dispatched query
+    quint64  lastShownSeq_  = 0;    // newest seq whose result is displayed
 
     QString crawlingLetter_;  // drive currently being crawled (for status text)
 };
