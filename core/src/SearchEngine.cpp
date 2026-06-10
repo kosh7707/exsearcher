@@ -32,8 +32,18 @@ bool contains(const char* hay, size_t hayLen, const std::string& needle) {
     return false;
 }
 
-std::vector<std::string> tokenize(const std::string& s) {
-    std::vector<std::string> tokens;
+// Query token kinds. All tokens AND together:
+//   Name   "보고서"  — substring of the file name (default)
+//   Suffix ".jpg"    — file name ends with the token (extension shorthand)
+//   Folder "사진\"   — some ancestor directory name contains the token
+struct Token {
+    enum Kind { Name, Suffix, Folder };
+    Kind kind;
+    std::string text;
+};
+
+std::vector<Token> tokenize(const std::string& s) {
+    std::vector<Token> tokens;
     size_t i = 0;
     while (i < s.size()) {
         while (i < s.size() && s[i] == ' ')
@@ -41,10 +51,37 @@ std::vector<std::string> tokenize(const std::string& s) {
         size_t start = i;
         while (i < s.size() && s[i] != ' ')
             ++i;
-        if (i > start)
-            tokens.emplace_back(s.substr(start, i - start));
+        if (i <= start)
+            continue;
+        std::string raw = s.substr(start, i - start);
+
+        Token tok;
+        if (raw.back() == '\\' || raw.back() == '/') {
+            tok.kind = Token::Folder;
+            size_t end = raw.size();
+            while (end > 0 && (raw[end - 1] == '\\' || raw[end - 1] == '/'))
+                --end;
+            size_t begin = 0;
+            while (begin < end && (raw[begin] == '\\' || raw[begin] == '/'))
+                ++begin;
+            tok.text = raw.substr(begin, end - begin);
+        } else if (raw.size() > 1 && raw[0] == '.') {
+            tok.kind = Token::Suffix;
+            tok.text = std::move(raw);
+        } else {
+            tok.kind = Token::Name;
+            tok.text = std::move(raw);
+        }
+        if (!tok.text.empty())
+            tokens.push_back(std::move(tok));
     }
     return tokens;
+}
+
+bool endsWith(const char* hay, size_t hayLen, const std::string& needle) {
+    return needle.size() <= hayLen &&
+           std::memcmp(hay + hayLen - needle.size(), needle.data(),
+                       needle.size()) == 0;
 }
 
 } // namespace
@@ -59,9 +96,14 @@ SearchResult SearchEngine::search(const std::wstring& query,
     // Case-fold the query the same way names were folded during indexing.
     std::wstring folded = wintext::caseFold(query);
     std::string foldedU8 = wintext::toUtf8(folded);
-    std::vector<std::string> tokens = tokenize(foldedU8);
+    std::vector<Token> tokens = tokenize(foldedU8);
     if (tokens.empty())
         return result;  // empty query = no results
+
+    // Evaluate cheap per-name tokens before folder tokens (ancestor walk).
+    std::stable_partition(tokens.begin(), tokens.end(), [](const Token& t) {
+        return t.kind != Token::Folder;
+    });
 
     const auto& entries = index_.entries();
     const size_t total = entries.size();
@@ -85,6 +127,19 @@ SearchResult SearchEngine::search(const std::wstring& query,
     if (threads == 0)
         threads = 1;
 
+    // True if any ancestor directory's (folded) name contains `text`.
+    auto ancestorContains = [&](const FileEntry& fe,
+                                const std::string& text) -> bool {
+        uint32_t cur = fe.parentIdx;
+        while (cur != Index::kNoParent) {
+            const FileEntry& dir = entries[cur];
+            if (contains(lower + dir.nameOffset, dir.nameLen, text))
+                return true;
+            cur = dir.parentIdx;
+        }
+        return false;
+    };
+
     auto nameMatches = [&](const FileEntry& fe) -> bool {
         // Tombstoned (logically deleted) entries never match. Cheap branch on
         // the already-loaded attr word; runs in both the single- and
@@ -93,9 +148,22 @@ SearchResult SearchEngine::search(const std::wstring& query,
             return false;
         const char* name = lower + fe.nameOffset;
         const size_t len = fe.nameLen;
-        for (const auto& tok : tokens)
-            if (!contains(name, len, tok))
-                return false;
+        for (const auto& tok : tokens) {
+            switch (tok.kind) {
+            case Token::Name:
+                if (!contains(name, len, tok.text))
+                    return false;
+                break;
+            case Token::Suffix:
+                if (!endsWith(name, len, tok.text))
+                    return false;
+                break;
+            case Token::Folder:
+                if (!ancestorContains(fe, tok.text))
+                    return false;
+                break;
+            }
+        }
         return true;
     };
 

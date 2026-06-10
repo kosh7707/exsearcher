@@ -26,6 +26,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSet>
@@ -132,6 +133,28 @@ void TitleBar::updateMaxGlyph(bool isMaximized) {
     btnMax_->setToolTip(isMaximized ? QStringLiteral("복원") : QStringLiteral("최대화"));
 }
 
+// Drag/double-click on the empty titlebar area. Caption buttons consume
+// their own mouse events, so these only fire outside the buttons.
+void TitleBar::mousePressEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton) {
+        if (QWindow* wh = window()->windowHandle()) {
+            wh->startSystemMove();  // native drag incl. drag-to-edge snapping
+            event->accept();
+            return;
+        }
+    }
+    QWidget::mousePressEvent(event);
+}
+
+void TitleBar::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton) {
+        emit maximizeToggleRequested();
+        event->accept();
+        return;
+    }
+    QWidget::mouseDoubleClickEvent(event);
+}
+
 // ============================================================
 // MainWindow implementation
 // ============================================================
@@ -178,6 +201,8 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
             this, &MainWindow::onMaximizeClicked);
     connect(titleBar_->btnClose(), &QPushButton::clicked,
             this, &MainWindow::onCloseClicked);
+    connect(titleBar_, &TitleBar::maximizeToggleRequested,
+            this, &MainWindow::onMaximizeClicked);
 
     // --- Search panel (elevated bar) ---
     auto* searchPanel = new QWidget(central);
@@ -195,7 +220,7 @@ MainWindow::MainWindow(const QVector<QString>& roots, QWidget* parent)
     search_ = new QLineEdit(searchRow);
     search_->setObjectName("searchBox");
     search_->setPlaceholderText(
-        QStringLiteral("검색어 입력… 공백으로 AND 검색"));
+        QStringLiteral("검색어 입력…  예: 사진\\ .jpg  (공백 = AND, 폴더\\, .확장자)"));
     search_->setClearButtonEnabled(true);
     search_->installEventFilter(this);
     searchRowLayout->addWidget(search_);
@@ -435,81 +460,15 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message,
             if (x > w - rb) { *result = HTRIGHT;  return true; }
         }
 
-        // Titlebar region in physical pixels.
-        const int tbH = static_cast<int>(titleBarHeight() * dpr);
-
-        if (y <= tbH) {
-            // Check if cursor is over a caption button so Windows can show the
-            // snap layout flyout over HTMAXBUTTON and route close/min correctly.
-            if (titleBar_) {
-                // Map cursor to titlebar widget coordinates (logical).
-                const QPoint logPt = QPoint(physToLog(x, dpr), physToLog(y, dpr));
-                const QPoint tbLocal = titleBar_->mapFrom(this, logPt);
-
-                // Check maximize button for HTMAXBUTTON (enables snap flyout).
-                if (titleBar_->btnMaximize()->geometry().contains(tbLocal)) {
-                    *result = HTMAXBUTTON;
-                    return true;
-                }
-                // Check minimize and close buttons — they are HTCLIENT so Qt
-                // receives mouse events and handles them normally.
-                if (titleBar_->btnMinimize()->geometry().contains(tbLocal) ||
-                    titleBar_->btnClose()->geometry().contains(tbLocal)) {
-                    *result = HTCLIENT;
-                    return true;
-                }
-            }
-            *result = HTCAPTION;
-            return true;
-        }
-
+        // Everything else is plain client area. The titlebar widget handles
+        // dragging itself via QWindow::startSystemMove(), so caption buttons
+        // are ordinary Qt widgets and receive mouse events natively. (This
+        // forgoes the Win11 snap-layout flyout on the maximize button, which
+        // requires HTMAXBUTTON + manual event forwarding — that forwarding is
+        // exactly what made the buttons unreliable. Win+Z and drag-to-edge
+        // snapping still work.)
         *result = HTCLIENT;
         return true;
-    }
-
-    // WM_NCLBUTTONDOWN / WM_NCLBUTTONUP for HTMAXBUTTON:
-    // Qt does not deliver QMouseEvent to widgets that are within an HT-claimed
-    // NC region.  We need to forward the click ourselves so the maximize button
-    // actually fires.  Track hover so the button still lights up correctly.
-    case WM_NCLBUTTONDOWN: {
-        if (msg->wParam == HTMAXBUTTON && titleBar_) {
-            // Simulate a press on the maximize button.
-            QMouseEvent press(QEvent::MouseButtonPress,
-                              QPointF(0, 0), QPointF(0, 0),
-                              Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(titleBar_->btnMaximize(), &press);
-            *result = 0;
-            return true;
-        }
-        break;
-    }
-    case WM_NCLBUTTONUP: {
-        if (msg->wParam == HTMAXBUTTON && titleBar_) {
-            QMouseEvent release(QEvent::MouseButtonRelease,
-                                QPointF(0, 0), QPointF(0, 0),
-                                Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(titleBar_->btnMaximize(), &release);
-            onMaximizeClicked();
-            *result = 0;
-            return true;
-        }
-        break;
-    }
-
-    // WM_NCMOUSEMOVE over HTMAXBUTTON: keep hover highlight alive.
-    case WM_NCMOUSEMOVE: {
-        if (msg->wParam == HTMAXBUTTON && titleBar_) {
-            QEvent enter(QEvent::Enter);
-            QApplication::sendEvent(titleBar_->btnMaximize(), &enter);
-        }
-        break;
-    }
-    case WM_NCMOUSELEAVE: {
-        if (titleBar_) {
-            QEvent leave(QEvent::Leave);
-            QApplication::sendEvent(titleBar_->btnMaximize(), &leave);
-        }
-        break;
     }
 
     default:

@@ -37,6 +37,14 @@ public:
     QPushButton* btnMaximize() const { return btnMax_; }
     QPushButton* btnClose()    const { return btnClose_; }
 
+signals:
+    // Emitted on titlebar double-click (empty area).
+    void maximizeToggleRequested();
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
+
 private:
     QPushButton* btnMin_   = nullptr;
     QPushButton* btnMax_   = nullptr;

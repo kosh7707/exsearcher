@@ -127,10 +127,12 @@ int main(int argc, char** argv) {
     if (!shotPath.isEmpty()) {
         // Optional EXSEARCHER_SHOT_QUERY env var pre-fills the search box so
         // the capture shows populated results.
-        const QByteArray q = qgetenv("EXSEARCHER_SHOT_QUERY");
+        // qEnvironmentVariable reads the native UTF-16 environment block, so
+        // Korean query text survives (qgetenv would mangle it via ANSI).
+        const QString q = qEnvironmentVariable("EXSEARCHER_SHOT_QUERY");
         if (!q.isEmpty()) {
             if (auto* box = win.findChild<QLineEdit*>())
-                box->setText(QString::fromUtf8(q));
+                box->setText(q);
         }
         QTimer::singleShot(700, &win, [&win, shotPath] {
             win.grab().save(shotPath);
